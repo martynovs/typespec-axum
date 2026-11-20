@@ -5,7 +5,14 @@
     "version": "1.0.0",
     "description": "A small pet store: every kind of parameter, body and answer the emitter writes."
   },
-  "tags": [],
+  "tags": [
+    {
+      "name": "pets"
+    },
+    {
+      "name": "admin"
+    }
+  ],
   "paths": {
     "/pets": {
       "get": {
@@ -36,6 +43,19 @@
             }
           },
           {
+            "name": "ids",
+            "in": "query",
+            "required": false,
+            "description": "Only these ids, comma-separated (`ids=p1,p2`): an array that is not exploded.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/PetId"
+              }
+            },
+            "explode": false
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -60,7 +80,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "pets"
+        ]
       },
       "post": {
         "operationId": "create_pet",
@@ -72,6 +95,13 @@
             "headers": {
               "location": {
                 "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-given-name": {
+                "required": false,
+                "description": "The name the pet was given, when it was changed on the way in.",
                 "schema": {
                   "type": "string"
                 }
@@ -182,6 +212,9 @@
             }
           }
         },
+        "tags": [
+          "admin"
+        ],
         "x-scope": "admin"
       }
     },
@@ -261,6 +294,56 @@
           }
         }
       }
+    },
+    "/pets/{id}/touch": {
+      "post": {
+        "operationId": "touch_pet",
+        "summary": "Touch a pet.",
+        "description": "The note is optional: a touch without one only marks the pet as seen.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PetId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pet"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Failure"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Note"
+              }
+            }
+          }
+        },
+        "deprecated": true
+      }
     }
   },
   "components": {
@@ -272,6 +355,17 @@
           "format": "int32"
         },
         "description": "How many pets there are of each species, by the species' names."
+      },
+      "Companion": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Kitten"
+          },
+          {
+            "$ref": "#/components/schemas/Puppy"
+          }
+        ],
+        "description": "Either, which one the `kind` says."
       },
       "Dog": {
         "type": "object",
@@ -307,6 +401,25 @@
         },
         "description": "Why a request was refused."
       },
+      "Kitten": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "kitten"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "description": "A kitten, told from a puppy by its `kind`."
+      },
       "NewPet": {
         "type": "object",
         "required": [
@@ -333,6 +446,18 @@
           }
         },
         "description": "What it takes to add a pet."
+      },
+      "Note": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "description": "A note left with a pet."
       },
       "Pet": {
         "type": "object",
@@ -411,6 +536,67 @@
           }
         },
         "description": "One page of pets."
+      },
+      "PetPatch": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "age": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "uint8"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mood": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "happy",
+                  "sad"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How it feels: one of two words, and may be cleared."
+          }
+        },
+        "description": "What to change about a pet: a field left out stays, one that is `null` is cleared."
+      },
+      "Puppy": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "puppy"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "description": "A puppy, told from a kitten by its `kind`."
       },
       "Species": {
         "type": "string",

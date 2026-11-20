@@ -1,0 +1,11 @@
+import "@typespec/http";
+import "@typespec/openapi";
+using Http;
+using OpenAPI;
+@service namespace Probe;
+scalar Code extends string;
+scalar Count extends int32;
+@route("/a") @get op count(): int32;
+@route("/b") @get op code(): Code;
+@route("/c") @get op counted(): Count;
+@route("/d") @get op get_bool(): boolean;

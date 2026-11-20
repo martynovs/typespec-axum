@@ -1,6 +1,6 @@
 /** Reads TypeSpec types and writes the Rust type each one is: the wire types of `types.rs`. */
-import { getDoc, getSummary, getExamples, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
-import { constPrefix, constraintValues, constraints, facts, q, rustField, schemaDeps, schemaExpr, type Config } from "./common.js";
+import { getDoc, getEncode, getNamespaceFullName, getSummary, getExamples, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
+import { Refusal, constPrefix, constraintValues, constraints, facts, jsonText, q, rustField, rustJson, schemaDeps, schemaExpr, type Config } from "./common.js";
 import {
   constantsImpl, containerNewtype, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion,
   type EnumMember, type StructField,
@@ -9,13 +9,14 @@ import {
 const SCALARS: Record<string, string> = {
   string: "String", boolean: "bool", int8: "i8", int16: "i16", int32: "i32", int64: "i64", safeint: "i64",
   uint8: "u8", uint16: "u16", uint32: "u32", uint64: "u64", float32: "f32", float64: "f64", float: "f64",
-  integer: "i64", numeric: "f64", decimal: "String", url: "String", bytes: "String",
+  integer: "i64", numeric: "f64", url: "String", bytes: "String",
   utcDateTime: "String", offsetDateTime: "String", plainDate: "String", plainTime: "String", duration: "String",
 };
 
 export function pascalIdent(s: string): string {
   const p = s.split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join("");
-  return /^[0-9]/.test(p) ? "_" + p : p;
+  // `Self` is the one keyword a variant name can come to, and cannot be a raw identifier.
+  return p === "Self" ? "Self_" : /^[0-9]/.test(p) ? "_" + p : p;
 }
 
 function ident(s: string): string {
@@ -23,9 +24,121 @@ function ident(s: string): string {
   return /^[0-9]/.test(r) ? "_" + r : r;
 }
 
+/** Names `types.rs` uses for the standard library and serde, which a type of the contract may not take: it would shadow them. */
+const RESERVED = new Set([
+  "Option", "Some", "None", "Result", "Ok", "Err", "Vec", "String", "Box", "Self", "Default", "Send", "Sync", "Clone", "Debug", "Copy",
+  "Eq", "PartialEq", "Serialize", "Deserialize", "Value", "Object",
+]);
+
+type Flat = [string | symbol, Type & { kind: "UnionVariant" }][];
+
+/** A union's flat variants, once: a union that more than one union refers to is not read again for each. A ring is never cached. */
+const flattened = new WeakMap<Type, Flat>();
+
+/** The variants of a flat list with the named literal unions among them spread too (`Kinds | "x"` is `"a" | "b" | "x"`), once each. */
+function deepVariants(flat: Flat): Flat {
+  const seen = new Set<Type>();
+  const walked = new Set<Type>(); // a union that more than one lists is walked once, or a chain of them would take time doubling with its length
+  const out: Flat = [];
+  const visit = (list: Flat) => {
+    for (const [k, v] of list) {
+      if (v.type.kind === "Union") {
+        if (walked.has(v.type)) continue;
+        walked.add(v.type);
+        visit(flattenUnion(v.type));
+      } else if (!seen.has(v.type)) {
+        seen.add(v.type);
+        out.push([k, v]);
+      }
+    }
+  };
+  visit(flat);
+  return out;
+}
+
+/** Whether a flat list of variants is string literals (and `null`) only, named literal unions among them included: a string enum. */
+const onlyLiterals = (flat: Flat) => {
+  const leaves = deepVariants(flat);
+  return leaves.some(([, v]) => v.type.kind === "String") && leaves.every(([, v]) => v.type.kind === "String" || isNull(v.type));
+};
+
+/** A named union of string literals (and `null`), however deep they are written: a string enum of its own, which holds the values it may have. */
+const isLiteralUnion = (u: Type & { kind: "Union" }) => !!u.name && onlyLiterals(flattenUnion(u));
+
+/**
+ * The variants of a union, those of a union that is one of them included: `("s" | "m") | null` is `"s" | "m" | null`, and so is
+ * `union Both { Status, int32 }` the variants of `Status` and `int32`. A Rust enum never has a union inside it, so no value is tried
+ * by one union only to be tried by another, and two unions cannot read each other for ever. A union that includes itself, however far
+ * down, has no end and is refused. A variant that comes twice (the same type from two unions) is one.
+ */
+function flattenUnion(t: Type & { kind: "Union" }, path: Type[] = [t]): Flat {
+  const known = flattened.get(t);
+  if (known) return known;
+  const out: Flat = [];
+  const seen = new Set<Type>();
+  // The variants a union writes itself are all kept (`pending: string` and `lagged: string` are two events); one copied in from a union
+  // inside it is dropped when this union already has it.
+  const add = (k: string | symbol, v: Type & { kind: "UnionVariant" }, copied: boolean) => {
+    if (copied && seen.has(v.type)) return;
+    seen.add(v.type);
+    out.push([k, v]);
+  };
+  for (const [k, v] of t.variants.entries()) {
+    const inner = v.type;
+    if (inner.kind !== "Union") {
+      add(k, v, false);
+      continue;
+    }
+    if (path.includes(inner)) {
+      throw new Refusal(
+        inner === t && path.length === 1
+          ? `${t.name ?? "a union"} cannot list itself as a variant`
+          : `${t.name ?? "a union"} and ${inner.name ?? "another"} are unions that include each other`,
+      );
+    }
+    const sub = flattenUnion(inner, [...path, inner]);
+    // A named union of literals stays one variant (its own enum); any other is spread into this one.
+    if (inner.name && onlyLiterals(sub)) add(k, v, false);
+    else for (const [subKey, subVariant] of sub) add(subKey, subVariant, true);
+  }
+  flattened.set(t, out);
+  return out;
+}
+
+/** Whether `target` is part of `t`: a variant, an element, a property, however deep. */
+function refersTo(t: Type, target: Type, seen = new Set<Type>()): boolean {
+  if (t === target) return true;
+  if (seen.has(t)) return false;
+  seen.add(t);
+  if (t.kind === "Union") return [...t.variants.values()].some((v) => refersTo(v.type, target, seen));
+  if (t.kind === "Model") {
+    return (!!t.indexer && refersTo(t.indexer.value, target, seen)) || (!!t.baseModel && refersTo(t.baseModel, target, seen))
+      || [...t.properties.values()].some((p) => refersTo(p.type, target, seen));
+  }
+  return false;
+}
+
+/** Whether a value of this type can be a JSON array: a list, or a union with a variant that can. A struct reads an array too. */
+function acceptsArray(t: Type, seen = new Set<Type>()): boolean {
+  if (seen.has(t)) return false;
+  seen.add(t);
+  if (t.kind === "Union") return flattenUnion(t).some(([, v]) => acceptsArray(v.type, seen));
+  return t.kind === "Model" && !!t.indexer && t.indexer.key.name === "integer";
+}
+
+/** Whether `null` is one of the values of a union, through unions that are variants of it. */
+function unionIsNullable(t: Type & { kind: "Union" }, seen = new Set<Type>()): boolean {
+  if (seen.has(t)) return false;
+  seen.add(t);
+  return flattenUnion(t).some(([, v]) => isNull(v.type) || (v.type.kind === "Union" && unionIsNullable(v.type, seen)));
+}
+
 /** The properties of a model after those of the models it extends, base first. */
 function ownAndInherited(t: Model): ModelProperty[] {
-  return [...(t.baseModel ? ownAndInherited(t.baseModel) : []), ...t.properties.values()];
+  // A property a model declares again (`@override`) replaces the base's, in the base's place.
+  const all = new Map<string, ModelProperty>();
+  for (const p of [...(t.baseModel ? ownAndInherited(t.baseModel) : []), ...t.properties.values()]) all.set(p.name, p);
+  return [...all.values()];
 }
 
 const isNull = (t: Type) => t.kind === "Intrinsic" && t.name === "null";
@@ -34,19 +147,48 @@ const isNever = (t: Type) => t.kind === "Intrinsic" && t.name === "never";
 /** Writes the Rust type each TypeSpec type is, defining it (once) in `defs` when it has a name. */
 export class Emitter {
   defs = new Map<string, string>();
-  private readonly numbered = new Map<Model, string>();
+  private readonly numbered = new Map<Type, string>();
+  /** The Rust names of scalars of the contract, which have `Display`. */
+  readonly scalars = new Set<string>();
+  /** The Rust types each defined type is made of, to find the untyped value a response may hold. */
+  private readonly parts = new Map<string, string[]>();
+  /** Types a field refers to without utoipa following it (`no_recursion`): the document must be told of them itself. */
+  readonly hidden = new Set<string>();
+  /** Union types with a `null` variant: `null` is one of their values, and an `Option` of them would swallow it. */
+  private readonly nullables = new Set<string>();
+
+  /** Every defined type `roots` are made of, however deep, and the roots themselves. */
+  closure(roots: Iterable<string>): Set<string> {
+    const out = new Set<string>();
+    const visit = (name: string) => {
+      if (out.has(name)) return;
+      out.add(name);
+      for (const part of this.parts.get(name) ?? []) for (const inner of part.match(/\b[A-Z]\w*\b/g) ?? []) visit(inner);
+    };
+    for (const root of roots) visit(root);
+    return out;
+  }
   constructor(readonly program: Program, readonly config: Config) {}
 
   /** The TypeSpec doc comment as Rust `///` lines, which utoipa turns into descriptions. */
   doc(t: Type, indent = ""): string {
     const d = getDoc(this.program, t);
-    return d ? d.split("\n").map((l) => `${indent}/// ${l}`.trimEnd()).join("\n") + "\n" : "";
+    if (!d) return "";
+    // A fenced block in a doc comment is a doctest, and the contract's prose is not Rust: an opening fence with no language says `text`.
+    let open = false;
+    const lines = d.split("\n").map((l) => {
+      const fence = l.match(/^(\s*)(```+|~~~+)/);
+      if (!fence) return l;
+      open = !open;
+      return open ? `${fence[1]}\`\`\`text` : `${fence[1]}\`\`\``;
+    });
+    return lines.map((l) => `${indent}/// ${l}`.trimEnd()).join("\n") + "\n";
   }
 
   /** `example = json!(..)` for the first `@example` (a derive takes one; TypeSpec allows several). */
   exampleList(target: any): string[] {
     const examples = getExamples(this.program, target);
-    return examples.length ? [`example = json!(${JSON.stringify(serializeValueAsJson(this.program, examples[0].value, target))})`] : [];
+    return examples.length ? [`example = json!(${rustJson(serializeValueAsJson(this.program, examples[0].value, target))})`] : [];
   }
 
   /** `#[schema(..)]` for a property: its constraints and example. */
@@ -61,8 +203,15 @@ export class Emitter {
     return base + args.map((a: any) => "Of" + this.argName(a)).join("");
   }
   argName(a: any): string {
+    if (a.entityKind === "Indeterminate") a = a.type; // a literal passed as a template argument may be a type or a value
     if (a.entityKind === "Type") {
       if (a.kind === "Intrinsic") return pascalIdent(a.name);
+      // A literal (`Pick<Pet, "id">`) or a type nothing names is told apart from another by what it is, so two instances are two types.
+      if (a.kind === "EnumMember") return `${ident(a.enum.name)}${pascalIdent(a.name)}`;
+      if (a.kind === "String" || a.kind === "Number" || a.kind === "Boolean") {
+        return `${a.kind === "String" ? "Str" : a.kind === "Number" ? "Num" : "Bool"}${pascalIdent(String(a.value).replace(/-/g, "Minus").replace(/\./g, "Dot"))}`;
+      }
+      if ((a.kind === "Model" || a.kind === "Union") && !a.name && !(a.kind === "Model" && a.indexer)) return this.numberOf(a);
       if (a.kind === "Model" && a.indexer && !a.name?.length) return "Vec" + this.argName(a.indexer.value);
       if ("name" in a && a.name) return this.nameOf(a);
       if (a.kind === "Model" && a.name === "Array") return "Vec";
@@ -87,9 +236,31 @@ export class Emitter {
   }
 
   /** The name of a model nothing names, by the order it was first met in. */
-  private numberOf(t: Model): string {
+  private numberOf(t: Type): string {
     if (!this.numbered.has(t)) this.numbered.set(t, `Anon${this.numbered.size + 1}`);
     return this.numbered.get(t)!;
+  }
+
+  /**
+   * The Rust type of a value of a map. A derive cannot describe a map whose values may be `null` and are a named type, so such a value
+   * is a newtype with its schema written by hand.
+   */
+  private mapValue(value: Type): string {
+    const ty = this.rust(value);
+    const named = ty.match(/^(?:Option<)+([A-Z]\w*)>+$/);
+    if (!named) return ty;
+    const inner = named[1];
+    const name = `Nullable${inner}`;
+    this.define(name, `nullable:${inner}`, () => {
+      this.parts.set(name, [inner]);
+      return `/// A \`${inner}\` or \`null\`, the value of a map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ${name}(pub Option<${inner}>);
+
+${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}, {"type": "null"}]})`, schemaDeps(inner, this.config.inlined))}`;
+    });
+    return name;
   }
 
   /** Whether TypeSpec writes this model out in place wherever it is used: an instance of a template. */
@@ -104,18 +275,32 @@ export class Emitter {
       case "String": case "Boolean": return t.kind === "String" ? "String" : "bool";
       case "Number": return Number.isInteger(t.value) ? "i64" : "f64";
       case "Enum": return this.enumeration(t);
+      case "EnumMember": return this.rust(t.enum); // a member as a type: the enum, which holds more than it says
       case "Union": return this.union(t);
       case "Model": return this.model(t);
       default: return "serde_json::Value";
     }
   }
 
+  /** The Rust type at the bottom of a chain of scalars (`scalar Price extends Money; scalar Money extends float64`). */
+  private rootOf(t: Type & { kind: "Scalar" }): string {
+    if (SCALARS[t.name] && t.namespace?.name === "TypeSpec") return SCALARS[t.name];
+    return t.baseScalar ? this.rootOf(t.baseScalar) : "String";
+  }
+
   /** A scalar with a name of its own is a newtype, so the document keeps the name (`Instant`). */
   private scalar(t: Type & { kind: "Scalar" }): string {
+    if (t.namespace?.name === "TypeSpec" && (t.name === "decimal" || t.name === "decimal128")) {
+      throw new Refusal(`${t.name} is a JSON number whose Rust type the contract cannot choose: use a scalar that extends string, or float64`);
+    }
     if (SCALARS[t.name] && t.namespace?.name === "TypeSpec") return SCALARS[t.name];
     const name = ident(t.name);
-    return this.alias(name, () => {
+    return this.define(name, this.identity(t), () => {
+      if (getEncode(this.program, t)) throw new Refusal(`${name}: @encode is not generated: the wire type would differ from the Rust type`);
+      this.scalars.add(name);
       const base = t.baseScalar ? this.rust(t.baseScalar) : "String";
+      this.parts.set(name, [base]);
+      const root = this.rootOf(t);
       // A derive cannot write a constraint on a newtype's field, so a constrained scalar takes a schema written by hand.
       const stated = constraintValues(this.program, t);
       const constrained = Object.keys(stated).length > 0;
@@ -123,111 +308,288 @@ export class Emitter {
         doc: this.doc(t),
         name,
         base,
-        derives: base.startsWith("f") ? "Debug, Clone, PartialEq" : "Debug, Clone, PartialEq, Eq, Hash",
+        derives: root.startsWith("f") ? "Debug, Clone, PartialEq" : "Debug, Clone, PartialEq, Eq, Hash",
         attr: constrained ? "" : this.schemaAttr(t).trim(),
         schema: !constrained,
       });
-      const consts = constantsImpl(name, facts(this.program, t, base));
+      const consts = constantsImpl(name, facts(this.program, t, root));
       if (!constrained) return `${code}${consts}`;
       const description = getDoc(this.program, t);
-      const sets = Object.entries({ ...stated, ...(description ? { description } : {}) }).map(([key, value]) => `schema[${q(key)}] = json!(${JSON.stringify(value)});`);
-      return `${code}${consts}\n${manualSchema(name, `{ let mut schema = ${schemaExpr(base, this.config.inlined)}; ${sets.join(" ")} schema }`, [])}`;
+      // The constraints are written on the type at the bottom of the chain: a `$ref` to the scalar it extends could not hold them.
+      const sets = Object.entries({ ...stated, ...(description ? { description } : {}) }).map(([key, value]) => `schema[${q(key)}] = json!(${rustJson(value)});`);
+      return `${code}${consts}\n${manualSchema(name, `{ let mut schema = ${schemaExpr(root, this.config.inlined)}; ${sets.join(" ")} schema }`, [])}`;
     });
   }
 
-  /** An enum is written by hand as a schema (each member with its title and description) and, when numeric, as a number. */
+  /** Whether a value of this Rust type is written as text (`Display`): what a `text/plain` body can be. */
+  displayable(ty: string): boolean {
+    return /^(String|bool|[iuf]\d+)$/.test(ty) || this.scalars.has(ty.slice(ty.lastIndexOf(":") + 1));
+  }
+
+  /** An enum is a Rust enum of its members; in `typespec` documents each member is written by hand with its title and description. */
   private enumeration(t: Type & { kind: "Enum" }): string {
     const name = ident(t.name);
-    return this.alias(name, () => {
-      const members = [...t.members.values()];
-      const numeric = members.some((m) => typeof m.value === "number");
-      const wire = (m: (typeof members)[number]) => (typeof m.value === "number" || typeof m.value === "string" ? m.value : m.name);
-      const data: EnumMember[] = members.map((m) => ({ doc: this.doc(m, "    "), variant: pascalIdent(m.name), wire: wire(m) }));
-      const code = (numeric ? numericEnum : stringEnum)({ doc: this.doc(t), name, members: data });
-      const consts = [...facts(this.program, t, name), ...members.flatMap((m) => facts(this.program, m, name, constPrefix(rustField(m.name))))];
-      const schema = {
-        description: getDoc(this.program, t),
-        oneOf: members.map((m) => ({
-          type: typeof wire(m) === "number" ? "integer" : "string",
-          enum: [wire(m)],
-          title: getSummary(this.program, m),
-          description: getDoc(this.program, m),
-        })),
-      };
-      return `${code}${constantsImpl(name, consts)}\n${manualSchema(name, `serde_json::json!(${JSON.stringify(schema)})`, [])}`;
-    });
+    return this.define(name, this.identity(t), () =>
+      this.valueEnum(name, t, [...t.members.values()].map((m) => ({
+        label: m.name,
+        value: typeof m.value === "number" || typeof m.value === "string" ? m.value : m.name,
+        target: m,
+      }))));
+  }
+
+  /** The enum of a set of values (an `enum`, or a `union` of string literals): string or number, each member its variant. */
+  private valueEnum(name: string, t: Type, all: { label: string; value: string | number; target: Type }[]): string {
+    // A value written twice (`("a" | "b") | ("b" | "c")`) is one: the first member that has it.
+    // Numbers are not merged: two members with one number is a mistake of the contract, which is refused below.
+    const members = all.some((m) => typeof m.value === "number") ? all : all.filter((m, i) => all.findIndex((other) => other.value === m.value) === i);
+    const numeric = members.some((m) => typeof m.value === "number");
+    if (numeric && members.some((m) => typeof m.value !== "number" || !Number.isInteger(m.value))) {
+      throw new Refusal(`${name}: a numeric enum takes whole numbers for every member`);
+    }
+    if (numeric) {
+      const values = new Set<number>();
+      for (const m of members) {
+        const v = m.value as number;
+        if (!Number.isSafeInteger(v)) throw new Refusal(`${name}: ${m.label} = ${v} is beyond the whole numbers a contract can state exactly (2^53)`);
+        if (values.has(v)) throw new Refusal(`${name}: two members are both ${v}: a Rust enum cannot hold two variants of one number`);
+        values.add(v);
+      }
+    }
+    const variants = uniqueNames();
+    const data: EnumMember[] = members.map((m) => ({ doc: this.doc(m.target, "    "), variant: variants(pascalIdent(m.label) || "Empty"), wire: m.value }));
+    const derived = this.config.document === "derived" && !numeric;
+    const code = (numeric ? numericEnum : stringEnum)({ doc: this.doc(t), name, members: data, schema: derived });
+    const prefixes = new Set<string>();
+    const consts = [...facts(this.program, t, name), ...members.flatMap((m) => {
+      const prefix = constPrefix(rustField(m.label));
+      if (prefixes.has(prefix)) return []; // `a` and `A` are one prefix: the first has the constants
+      prefixes.add(prefix);
+      return facts(this.program, m.target, name, prefix);
+    })];
+    if (derived) return `${code}${constantsImpl(name, consts)}`;
+    const schema = {
+      description: getDoc(this.program, t),
+      oneOf: members.map((m) => ({
+        type: typeof m.value === "number" ? "integer" : "string",
+        enum: [m.value],
+        title: getSummary(this.program, m.target),
+        description: getDoc(this.program, m.target),
+      })),
+    };
+    return `${code}${constantsImpl(name, consts)}\n${manualSchema(name, jsonText(schema), [])}`;
   }
 
   /** A union of two or more variants is an untagged enum with a hand-written `anyOf` (`oneOf` under `@oneOf`) schema. */
   private union(t: Type & { kind: "Union" }): string {
-    const variants = [...t.variants.entries()];
-    const nonNull = variants.filter(([, v]) => !isNull(v.type));
-    if (nonNull.length === 1 && variants.length === 2) return `Option<${this.rust(nonNull[0][1].type)}>`;
-    if (!t.name) {
-      // `"a" | "b"` is a string; its values are the schema's business (`literalSchema`).
-      if (nonNull.length > 0 && nonNull.every(([, v]) => v.type.kind === "String")) return variants.length > nonNull.length ? "Option<String>" : "String";
-      return "serde_json::Value";
+    // `Named | null` is that union, or `null`: an `Option`. Said before the union is flattened, which would copy its variants (and a
+    // union that holds itself through a list would be copied for ever).
+    const direct = [...t.variants.values()];
+    const solo = direct.filter((v) => !isNull(v.type));
+    if (direct.length === 2 && solo.length === 1 && solo[0].type.kind === "Union" && solo[0].type.name && !isLiteralUnion(solo[0].type)) {
+      return `Option<${this.rust(solo[0].type)}>`;
     }
-    const name = ident(t.name);
-    return this.alias(name, () => {
+    const flat = flattenUnion(t);
+    // A union of string literals, named ones among them, is read as the literals themselves.
+    const variants = onlyLiterals(flat) ? deepVariants(flat) : flat;
+    const nonNull = variants.filter(([, v]) => !isNull(v.type));
+    // A named union of string literals and `null` is a string enum that may be null: the enum, in an `Option`.
+    if (t.name && nonNull.length > 0 && nonNull.length < variants.length && nonNull.every(([, v]) => v.type.kind === "String")) {
+      const inner = `${this.nameOf(t)}Value`;
+      this.define(inner, `${this.identity(t)}#value`, () =>
+        this.valueEnum(inner, t, nonNull.map(([, v]) => ({ label: (v.type as any).value, value: (v.type as any).value, target: v }))));
+      return `Option<${inner}>`;
+    }
+    // `X | null` is an `Option` of X, unless X holds this union: then this is an enum, which is what lets the type hold itself.
+    if (nonNull.length === 1 && variants.length === 2 && !refersTo(nonNull[0][1].type, t)) return `Option<${this.rust(nonNull[0][1].type)}>`;
+    if (!t.name && nonNull.length > 0 && nonNull.every(([, v]) => v.type.kind === "String")) {
+      // `"a" | "b"` is a string; its values are the schema's business (`literalSchema`).
+      return variants.length > nonNull.length ? "Option<String>" : "String";
+    }
+    // A union nothing names whose variants are members of one enum is that enum.
+    if (!t.name && nonNull.length > 0 && nonNull.every(([, v]) => v.type.kind === "EnumMember" && v.type.enum === (nonNull[0][1].type as any).enum)) {
+      const only = this.rust((nonNull[0][1].type as any).enum);
+      return variants.length > nonNull.length ? `Option<${only}>` : only;
+    }
+    // A union nothing names (`string | int32`) is an untagged enum like a named one, numbered like any other nameless type.
+    const name = t.name ? this.nameOf(t) : this.numberOf(t);
+    // A union of string literals is a string enum.
+    if (variants.length > 0 && variants.every(([, v]) => v.type.kind === "String")) {
+      return this.define(name, this.identity(t), () =>
+        this.valueEnum(name, t, variants.map(([, v]) => ({ label: (v.type as any).value, value: (v.type as any).value, target: v }))));
+    }
+    return this.define(name, this.identity(t), () => {
+      // Known before the variants are read: a variant may refer back to this union, and a field of it must know `null` is a value.
+      if (unionIsNullable(t)) this.nullables.add(name);
       const types = variants.map(([, v]) => this.rust(v.type));
+      const lists = variants.map(([, v]) => acceptsArray(v.type));
+      const declared = [...types]; // the document lists the variants as the contract does
+      // An untagged enum reads a value as the first variant that takes it, and a struct takes a JSON array too: lists go first.
+      const order = types.map((_, i) => i).sort((a, b) => Number(lists[b]) - Number(lists[a]) || a - b);
+      variants.splice(0, variants.length, ...order.map((i) => variants[i]));
+      types.splice(0, types.length, ...order.map((i) => types[i]));
+      // Unions that are variants of each other read nothing as they go: a value that matches neither would be tried by each, for ever.
+      this.parts.set(name, types);
+      if (types.some((ty) => ty === "()" || ty.startsWith("Option<") || this.nullables.has(ty))) this.nullables.add(name);
+      // A variant that is a type being defined holds it directly: boxed, or the union and that type would each contain the other.
+      const held = types.map((ty) => this.boxIfDirect(ty));
       const oneOf = (t as any).decorators.some((d: any) => d.definition?.name === "@oneOf");
-      const schemas = types.map((ty) => schemaExpr(ty, this.config.inlined));
+      const schemas = declared.map((ty) => schemaExpr(ty, this.config.inlined));
       const body = schemas.length === 1 ? schemas[0] : `json!({${oneOf ? '"oneOf"' : '"anyOf"'}: [${schemas.join(", ")}]})`;
       const description = getDoc(this.program, t);
       const schema = description ? `{ let mut schema = ${body}; schema["description"] = json!(${q(description)}); schema }` : body;
+      const names = uniqueNames();
       const code = untaggedUnion({
         doc: this.doc(t),
         name,
         variants: variants.map(([k, v], i) => ({
-          name: typeof k === "string" ? pascalIdent(k) : pascalIdent(types[i].replace(/\W+/g, " ")),
-          ty: types[i],
+          name: names(typeof k === "string" ? pascalIdent(k) : types[i] === "()" ? "Null" : pascalIdent(types[i].replace(/\W+/g, " ")) || "Value"),
+          ty: held[i],
         })),
       });
-      const consts = [...facts(this.program, t, name), ...variants.flatMap(([k, v]) => (typeof k === "string" ? facts(this.program, v, name, constPrefix(rustField(k))) : []))];
+      const prefixes = new Set<string>();
+      const consts = [...facts(this.program, t, name), ...variants.flatMap(([k, v]) => {
+        if (typeof k !== "string") return [];
+        const prefix = constPrefix(rustField(k));
+        if (prefixes.has(prefix)) return [];
+        prefixes.add(prefix);
+        return facts(this.program, v, name, prefix);
+      })];
       return `${code}${constantsImpl(name, consts)}\n${manualSchema(name, schema, types.flatMap((ty) => schemaDeps(ty, this.config.inlined)))}`;
     });
   }
 
   private model(t: Type & { kind: "Model" }): string {
     if (t.name === "Array" && t.indexer) return `Vec<${this.rust(t.indexer.value)}>`;
-    if (t.name === "Record" && t.indexer) return `std::collections::BTreeMap<String, ${this.rust(t.indexer.value)}>`;
+    if (t.name === "Record" && t.indexer) return `std::collections::BTreeMap<String, ${this.mapValue(t.indexer.value)}>`;
     if (!t.name && t.properties.size === 0 && !t.indexer) return "serde_json::Value"; // `{}`: an open object; a field says so with value_type
     // An inline model takes the name of the model it copies, and is numbered when it copies none.
     const copied = t.name ? undefined : this.copyOf(t);
     const name = t.name ? this.nameOf(t) : copied ? this.nameOf(copied) : this.numberOf(t);
     if (this.isInstance(t) || (copied && this.isInstance(copied))) this.config.inlined.add(name);
-    return this.alias(name, () => {
+    return this.define(name, t.name || copied ? this.identity(copied ?? t) : name, () => {
+      if (t.indexer && t.properties.size > 0 && !isNever(t.indexer.value)) {
+        throw new Refusal(`${name}: a model with properties and additional properties (\`...Record<T>\`) is not generated`);
+      }
       // `model X is Record<T>` (or `T[]`) has no properties of its own: a newtype over the map (or list).
       if (t.indexer && t.properties.size === 0 && !isNever(t.indexer.value)) {
         const inner = t.indexer.key.name === "integer"
           ? `Vec<${this.rust(t.indexer.value)}>`
-          : `std::collections::BTreeMap<String, ${this.rust(t.indexer.value)}>`;
-        return containerNewtype({ doc: this.doc(t), name, inner }) + constantsImpl(name, facts(this.program, t, name));
+          : `std::collections::BTreeMap<String, ${this.mapValue(t.indexer.value)}>`;
+        this.parts.set(name, [inner]);
+        // A derive cannot be told not to follow the type inside a newtype, so one that holds itself has its schema written by hand.
+        const recursive = this.reachesInProgress(inner) || inner.includes("serde_json::Value");
+        const code = containerNewtype({ doc: this.doc(t), name, inner, schema: !recursive }) + constantsImpl(name, facts(this.program, t, name));
+        if (!recursive) return code;
+        const description = getDoc(this.program, t);
+        const body = schemaExpr(inner, this.config.inlined);
+        const schema = description ? `{ let mut schema = ${body}; schema["description"] = json!(${q(description)}); schema }` : body;
+        return `${code}\n${manualSchema(name, schema, schemaDeps(inner, this.config.inlined))}`;
       }
       const fields = ownAndInherited(t).map((p) => this.field(name, p));
+      this.parts.set(name, fields.map((f) => f.ty));
+      const seen = new Set<string>();
+      for (const f of fields) {
+        if (seen.has(f.ident)) throw new Refusal(`${name}: two properties are both the Rust field ${f.ident}: rename one in the contract`);
+        seen.add(f.ident);
+      }
       return structDef({ doc: this.doc(t), name, example: this.exampleList(t).join(", "), fields, consts: facts(this.program, t, name) });
     });
   }
 
+  /**
+   * Whether a Rust type is made, however deep, of a type still being defined: following it from here would come back to where it
+   * started. `Tree` in `children: Tree[]`, and `Kids` in `kids: Kids` when `union Kids { Node[] }` and `Node` is the one being defined.
+   */
+  private reachesInProgress(ty: string, seen = new Set<string>()): boolean {
+    for (const name of ty.match(/\b[A-Z]\w*\b/g) ?? []) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      if (this.defs.get(name) === "") return true;
+      if ((this.parts.get(name) ?? []).some((part) => this.reachesInProgress(part, seen))) return true;
+    }
+    return false;
+  }
+
+  /** A type held directly (not in a `Vec` or a map) that is still being defined has no size until it is boxed. */
+  private boxIfDirect(ty: string): string {
+    const option = ty.match(/^Option<(.*)>$/);
+    if (option) return `Option<${this.boxIfDirect(option[1])}>`;
+    return /^[A-Z]\w*$/.test(ty) && this.defs.get(ty) === "" ? `Box<${ty}>` : ty;
+  }
+
   private field(owner: string, p: ModelProperty): StructField {
-    const ty = this.rust(p.type);
-    const optional = p.optional && !ty.startsWith("Option<") ? `Option<${ty}>` : ty;
+    if (p.decorators.some((d: any) => d.definition?.name === "@visibility" || d.definition?.name === "@invisible")) {
+      throw new Refusal(`${owner}.${p.name}: @visibility is not generated: one struct serves every operation, so the wire shape cannot differ between them`);
+    }
+    if (getEncode(this.program, p)) throw new Refusal(`${owner}.${p.name}: @encode is not generated: the wire type would differ from the Rust type`);
+    const plain = this.rust(p.type);
+    // A type that refers back to one being defined (`children: Tree[]`, `parent?: Tree`) is boxed where it would have no size, and its
+    // schema is not followed again, or utoipa would never finish collecting it.
+    const inProgress = this.reachesInProgress(plain);
+    const ty = this.boxIfDirect(plain);
+    // A field that may be left out and may be `null` tells the two apart: `Some(None)` is `null`.
+    const doubled = p.optional && (ty.startsWith("Option<") || this.nullables.has(plain));
+    const optional = doubled && !ty.startsWith("Option<") ? `Option<Option<${ty}>>` : p.optional ? `Option<${ty}>` : ty;
+    if (inProgress) for (const name of plain.match(/\b[A-Z]\w*\b/g) ?? []) if (this.defs.has(name)) this.hidden.add(name);
     const open = p.type.kind === "Model" && !p.type.name && p.type.properties.size === 0 && !p.type.indexer;
-    const literal = this.literalSchema(p.type, owner, p) ?? this.unsignedSchema(p) ?? this.nullSchema(p);
+    // Only a `typespec` document is exact to the letter; a `derived` one leaves each field to the derive.
+    const literal = this.config.document === "typespec" ? this.literalSchema(p.type, owner, p) ?? this.formatSchema(owner, p) ?? this.nullSchema(owner, p) : undefined;
     // `Option<T>` is nullable in a schema; an optional field TypeSpec does not make `| null` is neither nullable nor required.
     const plainOptional = p.optional && !ty.startsWith("Option<") && !open && !literal;
+    const allowed = this.literalStrings(p.type);
+    const deserialize = allowed
+      ? this.literalReader(owner, p, allowed, doubled ? "double" : p.optional || ty.startsWith("Option<") ? "option" : "plain")
+      : doubled ? "double_option" : !p.optional && ty.startsWith("Option<") ? "required_option" : undefined;
     // The TypeSpec document writes an instance of a template (`Begun<X>`) out in place.
-    const instance = p.type.kind === "Model" && this.isInstance(p.type);
-    const extra = [
+    // So is a union nothing names (`string | int32`), which has a Rust type of its own only because Rust needs one.
+    // Not when the field refers back to what it is part of: written in place it would never end.
+    const instance = !inProgress && ((p.type.kind === "Model" && this.isInstance(p.type)) || (p.type.kind === "Union" && !p.type.name && /^Anon\d+$/.test(plain)));
+    const written = [
+      ...(inProgress ? ["no_recursion"] : []),
       ...(instance ? ["inline"] : []),
       ...(open ? ["value_type = Object"] : []),
       ...(literal ? [`schema_with = ${literal}`] : []),
       ...(!p.optional && optional.startsWith("Option<") ? ["required = true"] : []),
-      ...(plainOptional ? [`value_type = ${ty}`, "required = false"] : []),
-      ...(p.defaultValue ? [`default = json!(${JSON.stringify(serializeValueAsJson(this.program, p.defaultValue, p.type))})`] : []),
+      ...(plainOptional ? [`value_type = ${plain}`, "required = false"] : []),
+      ...(doubled ? [`value_type = ${ty.replace(/Box<([^<>]*)>/g, "$1")}`, "required = false"] : []),
+      ...(p.defaultValue ? [`default = json!(${rustJson(serializeValueAsJson(this.program, p.defaultValue, p.type))})`] : []),
     ];
-    return { doc: this.doc(p, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional, consts: facts(this.program, p, ty, constPrefix(rustField(p.name))) };
+    // utoipa writes a `serde_json::Value` as an empty schema, which it cannot read back: say it is an object, as everywhere else it is written.
+    const objectOf = (text: string) => text.replace(/serde_json::Value/g, "Object");
+    const extra = written.map((e) => (e.startsWith("value_type = ") ? objectOf(e) : e));
+    if (!written.some((e) => e.startsWith("value_type = ")) && !literal && ty.includes("serde_json::Value")) extra.push(`value_type = ${objectOf(ty)}`);
+    return { doc: this.doc(p, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional, deserialize, consts: facts(this.program, p, ty, constPrefix(rustField(p.name))) };
+  }
+
+  /** The values of a property typed as string literals (`"cat"`, `"a" | "b"`, either with `| null`), or undefined for any other type. */
+  private literalStrings(t: Type): string[] | undefined {
+    const variants = t.kind === "Union" && !t.name ? deepVariants(flattenUnion(t)).map(([, v]) => v.type) : [t];
+    const strings = variants.filter((v) => v.kind === "String").map((v) => (v as any).value as string);
+    return strings.length > 0 && strings.length + variants.filter(isNull).length === variants.length ? strings : undefined;
+  }
+
+  private readonly fnNames = new Map<string, string>();
+
+  /** A name for a helper function of one property: lower-cased like Rust's, and never another property's (`cD` and `cd` are two). */
+  private fnName(kind: string, owner: string, property: ModelProperty): string {
+    const key = `${kind}|${owner}|${property.name}`;
+    let name = this.fnNames.get(key);
+    if (name === undefined) {
+      const base = `${kind}_${owner}_${ident(property.name)}`.toLowerCase();
+      name = base;
+      for (let n = 2; this.defs.has(`fn ${name}`); n++) name = `${base}_${n}`;
+      this.fnNames.set(key, name);
+    }
+    return name;
+  }
+
+  /** The function that reads such a field, so a value that is not one of them is refused (an untagged union picks its variant by this). */
+  private literalReader(owner: string, property: ModelProperty, allowed: string[], shape: "plain" | "option" | "double"): string {
+    const name = this.fnName("literal", owner, property);
+    const list = `&[${allowed.map(q).join(", ")}]`;
+    const [returns, helper] = shape === "double" ? ["Option<Option<String>>", "double_one_of"] : shape === "option" ? ["Option<String>", "one_of_option"] : ["String", "one_of"];
+    this.alias(`fn ${name}`, () => `fn ${name}<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<${returns}, D::Error> {\n    ${helper}(deserializer, ${list})\n}`);
+    return name;
   }
 
   /**
@@ -240,35 +602,37 @@ export class Emitter {
         : v.kind === "Number" ? { type: Number.isInteger(v.value) ? "integer" : "number", enum: [v.value] }
         : v.kind === "Boolean" ? { type: "boolean", enum: [v.value] }
         : isNull(v) ? { type: "null" } : undefined;
-    const variants = t.kind === "Union" && !t.name ? [...t.variants.values()].map((v) => v.type) : [t];
+    const variants = t.kind === "Union" && !t.name ? deepVariants(flattenUnion(t)).map(([, v]) => v.type) : [t];
     const schemas = variants.map(one);
     if (schemas.some((s) => s === undefined) || variants.every(isNull)) return undefined;
     return this.schemaFn(owner, property, schemas.length === 1 ? schemas[0]! : { anyOf: schemas });
   }
 
   /**
-   * A property typed `uint32` (or another unsigned width) is `format: uint32` in the TypeSpec document, which a derive cannot write:
-   * it writes `int32` with `minimum: 0`. Returns the name of the function that gives the field its schema, or undefined.
+   * A property typed `uint32` (or `uint8`, `int16`, ...) is `format: uint32` in the TypeSpec document, which a derive cannot write:
+   * it writes `int32` (with `minimum: 0` for an unsigned one). Returns the name of the function that gives the field its schema,
+   * or undefined.
    */
-  private unsignedSchema(property: ModelProperty): string | undefined {
+  private formatSchema(owner: string, property: ModelProperty): string | undefined {
     const t = property.type;
-    if (t.kind !== "Scalar" || t.namespace?.name !== "TypeSpec" || !/^uint(8|16|32|64)$/.test(t.name)) return undefined;
+    if (t.kind !== "Scalar" || t.namespace?.name !== "TypeSpec" || !/^(uint(8|16|32|64)|int(8|16))$/.test(t.name)) return undefined;
     if (constraints(this.program, property).length) return undefined; // a stated bound is the derive's to write
-    return this.schemaFn(property.model?.name || "model", property, { type: "integer", format: t.name });
+    return this.schemaFn(owner, property, { type: "integer", format: t.name });
   }
 
   /** A property typed `null` (a `()`) is `type: null` in the TypeSpec document; a derive writes `default: null`. */
-  private nullSchema(property: ModelProperty): string | undefined {
-    return isNull(property.type) ? this.schemaFn(property.model?.name || "model", property, { type: "null" }) : undefined;
+  private nullSchema(owner: string, property: ModelProperty): string | undefined {
+    return isNull(property.type) ? this.schemaFn(owner, property, { type: "null" }) : undefined;
   }
 
   /** The function that gives a field the schema `body`, with the field's own doc as its description. Returns its name. */
   private schemaFn(owner: string, property: ModelProperty, body: object): string {
-    const name = `schema_${owner}_${ident(property.name)}`.toLowerCase();
+    const name = this.fnName("schema", owner, property);
     this.alias(`fn ${name}`, () => {
       // With `schema_with` the derive no longer adds the field's doc as its description.
       const description = getDoc(this.program, property);
-      return literalSchemaFn(name, JSON.stringify({ ...body, description }));
+      const fallback = property.defaultValue ? { default: serializeValueAsJson(this.program, property.defaultValue, property.type) } : {};
+      return literalSchemaFn(name, JSON.stringify({ ...body, description, ...fallback }));
     });
     return name;
   }
@@ -280,13 +644,46 @@ export class Emitter {
   untyped(ty: string, seen = new Set<string>()): string | undefined {
     if (/\bserde_json::Value\b/.test(ty)) return ty;
     for (const name of ty.match(/\b[A-Z]\w*\b/g) ?? []) {
-      const def = this.defs.get(name);
-      if (def === undefined || seen.has(name)) continue;
+      const parts = this.parts.get(name);
+      if (parts === undefined || seen.has(name)) continue;
       seen.add(name);
-      const loose = /\bserde_json::Value\b/.test(def) ? name : this.untyped(def, seen);
-      if (loose) return loose === name ? name : `${name} → ${loose}`;
+      for (const part of parts) {
+        const loose = this.untyped(part, seen);
+        if (loose) return `${name} → ${loose}`;
+      }
     }
     return undefined;
+  }
+
+  /** Who a type is, namespace included: two types of one name in different namespaces are two types. */
+  private identity(t: any): string {
+    if (t.kind === "String" || t.kind === "Number" || t.kind === "Boolean") return `literal:${t.kind}:${t.value}`;
+    if (t.kind === "EnumMember") return `member:${this.identity(t.enum)}.${t.name}`;
+    if (!t.name && (t.kind === "Model" || t.kind === "Union")) return `anonymous:${this.numberOf(t)}`;
+    const args = (t.templateMapper?.args ?? []).map((a: any) => {
+      if (a.entityKind === "Indeterminate") a = a.type;
+      return a.entityKind === "Type" ? this.identity(a) : "?";
+    });
+    return `${t.namespace ? getNamespaceFullName(t.namespace) : ""}.${t.name ?? ""}${args.length ? `<${args.join(",")}>` : ""}`;
+  }
+
+  private readonly identities = new Map<string, string>();
+
+  /**
+   * Defines the Rust type of a type of the contract. It must be the only one to take its name, unless another of that name is written
+   * identically, and not take one `types.rs` uses: the emit fails rather than merge two different types or shadow one.
+   */
+  define(name: string, identity: string, make: () => string): string {
+    if (!/^[A-Z][A-Za-z0-9_]*$/.test(name)) throw new Refusal(`the type ${identity} is named ${name} in Rust: a type's name starts with a capital letter and holds only ASCII letters, digits and \`_\`: rename it in the contract`);
+    if (RESERVED.has(name)) throw new Refusal(`the type ${identity} is named ${name}, which the generated code uses: rename it in the contract`);
+    const prior = this.identities.get(name);
+    if (prior !== undefined && prior !== identity) {
+      // Two types of one name are one Rust type only when they are written the same (a model each service declares for itself).
+      if (this.defs.get(name) !== make()) throw new Refusal(`two types would both be ${name}: ${prior} and ${identity}, and they differ: rename one in the contract`);
+      return name;
+    }
+    this.identities.set(name, identity);
+    return this.alias(name, make);
   }
 
   alias(name: string, make: () => string): string {
@@ -296,4 +693,15 @@ export class Emitter {
     }
     return name;
   }
+}
+
+/** A function that returns each name once: the name, or the name with the number of its second use. */
+export function uniqueNames(): (name: string) => string {
+  const used = new Set<string>();
+  return (name) => {
+    let unique = name;
+    for (let n = 2; used.has(unique); n++) unique = `${name}${n}`;
+    used.add(unique);
+    return unique;
+  };
 }

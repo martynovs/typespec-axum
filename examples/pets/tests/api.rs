@@ -4,7 +4,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use pets_example::api::petstore::{
-    self, CreatePet, DeletePet, GetPet, ListPets, Operation, PetEvents, create_pet,
+    self, CreatePet, DeletePet, GetPet, ListPets, Operation, PetEvents, TouchPet, create_pet,
 };
 use pets_example::store::Shop;
 use serde_json::{Value, json};
@@ -145,6 +145,46 @@ async fn body_that_does_not_decode_is_refused_with_the_status_the_contract_lists
 }
 
 #[tokio::test]
+async fn body_that_nests_too_deep_is_refused_before_it_is_parsed() {
+    let app = app();
+    let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+    let body = |depth: usize| {
+        format!(
+            r#"{{"name":"Rex","species":"dog","tags":[{}]}}"#,
+            nested(depth)
+        )
+    };
+    let post = |text: String| {
+        Request::post("/pets")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(text))
+            .expect("a request")
+    };
+    // A body of a modest depth is read (and refused for what it is: tags are strings, not lists).
+    let status = app
+        .clone()
+        .oneshot(post(body(5)))
+        .await
+        .expect("a response")
+        .status();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Deeper than the API accepts is refused before any of it is parsed, whatever it holds.
+    let status = app
+        .clone()
+        .oneshot(post(body(60)))
+        .await
+        .expect("a response")
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Brackets in a string are text, not depth.
+    let text = format!(r#"{{"name":"{}","species":"dog"}}"#, "[".repeat(200));
+    assert_eq!(
+        app.oneshot(post(text)).await.expect("a response").status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
 async fn query_over_the_bounds_is_refused_before_it_is_parsed() {
     let app = app();
     let long = format!("/pets?species={}", "x".repeat(5000));
@@ -204,6 +244,12 @@ impl DeletePet for Keeper {
         None
     }
 }
+impl TouchPet for Keeper {
+    fn touch_pet_handler(&self) -> Option<petstore::touch_pet::Call> {
+        self.0.touch_pet_handler()
+    }
+}
+
 impl PetEvents for Keeper {
     fn pet_events_handler(&self) -> Option<petstore::pet_events::Call> {
         self.0.pet_events_handler()
@@ -223,6 +269,125 @@ async fn operation_a_node_cannot_serve_is_not_mounted() {
     );
 }
 
+#[tokio::test]
+async fn body_needs_a_json_content_type() {
+    let app = app();
+    for content_type in ["text/plain", "application/x-www-form-urlencoded"] {
+        let request = Request::post("/pets")
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(r#"{"name":"Rex","species":"dog"}"#))
+            .expect("a request");
+        let status = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("a response")
+            .status();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{content_type}");
+    }
+    // Any +json type is JSON; so is a charset parameter.
+    for content_type in [
+        "application/merge-patch+json",
+        "Application/JSON; charset=utf-8",
+    ] {
+        let request = Request::post("/pets")
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(r#"{"name":"Rex","species":"dog"}"#))
+            .expect("a request");
+        let status = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("a response")
+            .status();
+        assert_eq!(status, StatusCode::CREATED, "{content_type}");
+    }
+}
+
+#[tokio::test]
+async fn array_query_that_is_not_exploded_is_comma_separated() {
+    let app = app();
+    for name in ["Rex", "Tom", "Fido"] {
+        adopt(&app, name, "dog", &[]).await;
+    }
+    let (_, _, body) = send(&app, Method::GET, "/pets?ids=p1,p3", None).await;
+    let names: Vec<String> = json_of(&body)["pets"]
+        .as_array()
+        .expect("pets")
+        .iter()
+        .map(|pet| pet["name"].as_str().expect("name").to_owned())
+        .collect();
+    assert_eq!(names, ["Rex", "Fido"]);
+    // The commas are split before the items are decoded: an encoded comma is part of an item, not between two.
+    let (_, _, body) = send(&app, Method::GET, "/pets?ids=p1%2Cp3", None).await;
+    assert_eq!(json_of(&body)["pets"], json!([]));
+    let (_, _, body) = send(&app, Method::GET, "/pets?ids=p1%2C,p3", None).await;
+    assert_eq!(json_of(&body)["pets"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn optional_response_header_is_sent_only_when_there_is_a_value() {
+    let app = app();
+    let (_, headers, _) = send(
+        &app,
+        Method::POST,
+        "/pets",
+        Some(json!({"name": "Rex", "species": "dog"})),
+    )
+    .await;
+    assert!(!headers.contains_key("x-given-name"));
+    let (_, headers, _) = send(
+        &app,
+        Method::POST,
+        "/pets",
+        Some(json!({"name": "  Tom ", "species": "cat"})),
+    )
+    .await;
+    assert_eq!(headers["x-given-name"], "Tom");
+}
+
+#[tokio::test]
+async fn header_value_http_cannot_carry_is_a_500_not_a_panic() {
+    // The handler hands back a name with a newline in it for a header: a fault of the handler, which the router answers.
+    let (status, headers, _) = send(
+        &app(),
+        Method::POST,
+        "/pets",
+        Some(json!({"name": " a\nb ", "species": "cat"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!headers.contains_key("x-given-name"));
+}
+
+#[tokio::test]
+async fn body_that_may_be_left_out_is_an_option() {
+    let app = app();
+    adopt(&app, "Rex", "dog", &[]).await;
+    let (status, _, body) = send(&app, Method::POST, "/pets/p1/touch", None).await;
+    assert_eq!(
+        (status, json_of(&body)["tags"].clone()),
+        (StatusCode::OK, json!([]))
+    );
+    let (_, _, body) = send(
+        &app,
+        Method::POST,
+        "/pets/p1/touch",
+        Some(json!({"text": "hi"})),
+    )
+    .await;
+    assert_eq!(json_of(&body)["tags"], json!(["note:hi"]));
+    // A body that is there must still decode.
+    let (status, _, _) = send(
+        &app,
+        Method::POST,
+        "/pets/p1/touch",
+        Some(json!({"nope": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[test]
 fn operation_carries_what_the_contract_states_of_it() {
     let delete = Operation::DELETE_PET;
@@ -234,7 +399,47 @@ fn operation_carries_what_the_contract_states_of_it() {
         ("x-scope", "\"admin\"")
     );
     assert!(Operation::GET_PET.as_ref().extensions.is_empty());
-    assert_eq!(Operation::ALL.len(), 5);
+    assert_eq!(Operation::ALL.len(), 6);
+}
+
+#[test]
+fn literal_property_decides_the_variant_of_a_union() {
+    use pets_example::types::Companion;
+    let puppy: Companion =
+        serde_json::from_value(json!({"kind": "puppy", "name": "Rex"})).expect("a puppy");
+    assert!(matches!(puppy, Companion::Puppy(_)), "{puppy:?}");
+    let kitten: Companion =
+        serde_json::from_value(json!({"kind": "kitten", "name": "Tom"})).expect("a kitten");
+    assert!(matches!(kitten, Companion::Kitten(_)), "{kitten:?}");
+    // A kind neither declares is neither.
+    assert!(
+        serde_json::from_value::<Companion>(json!({"kind": "dragon", "name": "Smaug"})).is_err()
+    );
+}
+
+#[test]
+fn field_left_out_and_field_that_is_null_are_told_apart() {
+    use pets_example::types::PetPatch;
+    let left_out: PetPatch = serde_json::from_value(json!({})).expect("a patch");
+    assert_eq!((left_out.note.clone(), left_out.age), (None, None));
+    let cleared: PetPatch =
+        serde_json::from_value(json!({"note": null, "age": 3})).expect("a patch");
+    assert_eq!(
+        (cleared.note.clone(), cleared.age),
+        (Some(None), Some(Some(3)))
+    );
+    // A literal that may be left out and may be null is still only its values.
+    let mood: PetPatch = serde_json::from_value(json!({"mood": "happy"})).expect("a patch");
+    assert_eq!(mood.mood, Some(Some("happy".to_owned())));
+    let cleared_mood: PetPatch = serde_json::from_value(json!({"mood": null})).expect("a patch");
+    assert_eq!(cleared_mood.mood, Some(None));
+    assert!(serde_json::from_value::<PetPatch>(json!({"mood": "furious"})).is_err());
+    // And it says so again: nothing for the one left out, `null` for the one cleared.
+    assert_eq!(serde_json::to_value(&left_out).expect("JSON"), json!({}));
+    assert_eq!(
+        serde_json::to_value(&cleared).expect("JSON"),
+        json!({"note": null, "age": 3})
+    );
 }
 
 #[test]
@@ -314,10 +519,13 @@ fn facts(document: &Value) -> BTreeSet<String> {
             facts.insert(format!("{at} summary {}", operation["summary"]));
             for parameter in operation["parameters"].as_array().into_iter().flatten() {
                 facts.insert(format!(
-                    "{at} {} {} required={}",
+                    "{at} {} {} required={} explode={:?}",
                     parameter["in"],
                     parameter["name"],
-                    parameter["required"].as_bool().unwrap_or(false)
+                    parameter["required"].as_bool().unwrap_or(false),
+                    // Only an array has a use for it; absent means `true` for a query parameter.
+                    (parameter["schema"]["type"] == "array")
+                        .then(|| parameter["explode"].as_bool().unwrap_or(true))
                 ));
             }
             for (status, response) in operation["responses"].as_object().expect("responses") {
@@ -328,6 +536,11 @@ fn facts(document: &Value) -> BTreeSet<String> {
                     .collect();
                 facts.insert(format!("{at} {status} {media:?}"));
             }
+            facts.insert(format!("{at} tags {}", operation["tags"]));
+            facts.insert(format!(
+                "{at} deprecated {}",
+                operation["deprecated"].as_bool().unwrap_or(false)
+            ));
             for (name, value) in operation.as_object().expect("an operation") {
                 if name.starts_with("x-") {
                     facts.insert(format!("{at} {name} {value}"));

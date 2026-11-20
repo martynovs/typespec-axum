@@ -1,27 +1,53 @@
 {
-  "name": "typespec-axum",
+  "name": "@martynovs/typespec-axum",
   "version": "0.1.0",
   "description": "A TypeSpec emitter that writes Rust: serde wire types, axum endpoints and a utoipa OpenAPI document, straight from the contract.",
-  "keywords": ["typespec", "emitter", "rust", "axum", "utoipa", "openapi"],
+  "keywords": [
+    "typespec",
+    "emitter",
+    "rust",
+    "axum",
+    "utoipa",
+    "openapi"
+  ],
   "license": "MIT OR Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/martynovs/typespec-axum.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/martynovs/typespec-axum.git"
+  },
   "homepage": "https://github.com/martynovs/typespec-axum#readme",
-  "bugs": { "url": "https://github.com/martynovs/typespec-axum/issues" },
+  "bugs": {
+    "url": "https://github.com/martynovs/typespec-axum/issues"
+  },
   "type": "module",
   "main": "dist/src/index.js",
-  "exports": { ".": { "default": "./dist/src/index.js", "typespec": "./dist/src/index.js" } },
-  "files": ["dist/src", "dist/package.json", "LICENSE-MIT", "LICENSE-APACHE", "README.md"],
-  "engines": { "node": ">=22" },
+  "exports": {
+    ".": {
+      "default": "./dist/src/index.js",
+      "typespec": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "dist/package.json",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p .",
-    "typecheck": "tsc -p . --noEmit"
+    "typecheck": "tsc -p . --noEmit",
+    "prepare": "tsc -p ."
   },
   "peerDependencies": {
     "@typespec/compiler": "^1.17.0",
-    "@typespec/events": "^0.87.0",
+    "@typespec/events": ">=0.87.0 <1",
     "@typespec/http": "^1.17.0",
     "@typespec/openapi": "^1.17.0",
-    "@typespec/streams": "^0.87.0"
+    "@typespec/streams": ">=0.87.0 <1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -33,5 +59,8 @@
     "@typespec/sse": "0.87.0",
     "@typespec/streams": "0.87.0",
     "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -24,3 +24,5 @@ jobs:
       - run: just check
       # Builds the example against the generated code and checks its document against @typespec/openapi3's.
       - run: just test
+      # Every contract of tests/probes is emitted and built, or refused with the diagnostic it names, in both document modes.
+      - run: just probes

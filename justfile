@@ -24,6 +24,11 @@ fmt:
 test: generate
     cargo test --manifest-path examples/pets/Cargo.toml
 
+# Compile the contracts of tests/probes: each is emitted and built, or refused with the diagnostic it names.
+probes: build
+    tests/probes.sh
+    DOCUMENT=typespec tests/probes.sh
+
 # Serve the example on 127.0.0.1:3000.
 serve: generate
     cargo run --manifest-path examples/pets/Cargo.toml

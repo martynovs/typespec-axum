@@ -1,13 +1,14 @@
 //! The pet store's handlers: an in-memory `Store`, and `Shop`, the node that serves each operation with one of its methods.
 use crate::api::Refused;
 use crate::api::petstore::{
-    CreatePet, DeletePet, GetPet, ListPets, PetEvent, PetEvents, create_pet, delete_pet, get_pet,
-    list_pets, pet_events,
+    CreatePet, DeletePet, GetPet, ListPets, PetEvent, PetEvents, TouchPet, create_pet, delete_pet,
+    get_pet, list_pets, pet_events, touch_pet,
 };
 use crate::types::{Failure, NewPet, Pet, PetId, PetPage};
 use axum::Json;
 use axum::http::{StatusCode, request::Parts};
 use axum::response::{IntoResponse, sse::Event};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,23 +20,18 @@ pub struct Store {
 }
 
 fn refusal(status: StatusCode, code: &str, message: String) -> Refused {
-    Refused(
-        (
-            status,
-            Json(Failure {
-                code: code.to_owned(),
-                message,
-            }),
-        )
-            .into_response(),
-    )
+    let failure = Failure {
+        code: code.to_owned(),
+        message,
+    };
+    Refused((status, Json(failure)).into_response())
 }
 
 fn not_found(id: &str) -> Refused {
     refusal(StatusCode::NOT_FOUND, "not_found", format!("no pet {id:?}"))
 }
 
-fn text_of<T: serde::Serialize>(value: &T) -> String {
+fn text_of<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -69,6 +65,7 @@ impl Store {
                     .is_none_or(|species| text_of(&pet.species) == species)
             })
             .filter(|pet| input.tag.iter().all(|tag| pet.tags.contains(tag)))
+            .filter(|pet| input.ids.is_empty() || input.ids.contains(&pet.id.0))
             .take(limit)
             .cloned()
             .collect();
@@ -86,17 +83,20 @@ impl Store {
             age,
             tags,
         } = input.body;
-        if name.trim().is_empty() {
+        // A name is stored without the space round it; when that changed it, the answer says what it became.
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
             return Err(refusal(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "blank_name",
                 "a pet needs a name".to_owned(),
             ));
         }
+        let given_name = (trimmed != name).then(|| trimmed.to_owned());
         let id = format!("p{}", self.issued.fetch_add(1, Ordering::Relaxed) + 1);
         let pet = Pet {
             id: PetId(id.clone()),
-            name,
+            name: trimmed.to_owned(),
             age,
             species,
             tags: tags.unwrap_or_default(),
@@ -108,6 +108,7 @@ impl Store {
         Ok(create_pet::Answer {
             body: pet,
             location: format!("/pets/{id}"),
+            x_given_name: given_name,
         })
     }
 
@@ -122,6 +123,22 @@ impl Store {
             .get(&input.id)
             .cloned()
             .ok_or_else(|| not_found(&input.id))
+    }
+
+    pub async fn touch_pet(
+        self: Arc<Self>,
+        _parts: Parts,
+        input: touch_pet::Input,
+    ) -> Result<touch_pet::Answer, Refused> {
+        let mut pets = self.pets.lock().expect("the pets lock");
+        let pet = pets
+            .get_mut(&input.id)
+            .ok_or_else(|| not_found(&input.id))?;
+        // `Input::body` is an `Option`: the contract says the note may be left out.
+        if let Some(note) = input.body {
+            pet.tags.push(format!("note:{}", note.text));
+        }
+        Ok(pet.clone())
     }
 
     pub async fn delete_pet(
@@ -179,6 +196,12 @@ impl CreatePet for Shop {
 impl GetPet for Shop {
     fn get_pet_handler(&self) -> Option<get_pet::Call> {
         Some(get_pet::call_with_state(self.0.clone(), Store::get_pet))
+    }
+}
+
+impl TouchPet for Shop {
+    fn touch_pet_handler(&self) -> Option<touch_pet::Call> {
+        Some(touch_pet::call_with_state(self.0.clone(), Store::touch_pet))
     }
 }
 

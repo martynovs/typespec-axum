@@ -5,3 +5,5 @@ tsp-output
 examples/*/target
 *.log
 .DS_Store
+.probes
+.probes-*

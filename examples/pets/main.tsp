@@ -67,6 +67,38 @@ model PetPage {
   next?: string;
 }
 
+/** A kitten, told from a puppy by its `kind`. */
+model Kitten {
+  kind: "kitten";
+  name: string;
+}
+
+/** A puppy, told from a kitten by its `kind`. */
+model Puppy {
+  kind: "puppy";
+  name: string;
+}
+
+/** Either, which one the `kind` says. */
+union Companion {
+  kitten: Kitten,
+  puppy: Puppy,
+}
+
+/** What to change about a pet: a field left out stays, one that is `null` is cleared. */
+model PetPatch {
+  note?: string | null;
+  age?: uint8 | null;
+
+  /** How it feels: one of two words, and may be cleared. */
+  mood?: "happy" | "sad" | null;
+}
+
+/** A note left with a pet. */
+model Note {
+  text: string;
+}
+
 /** Why a request was refused. */
 model Failure {
   /** A stable word to branch on. */
@@ -100,6 +132,7 @@ union PetEvent {
 /** Pets of one species, or tagged with all of `tag`, a page at a time. */
 @route("/pets")
 @get
+@tag("pets")
 @summary("List pets.")
 op list_pets(
   /** Only this species. */
@@ -107,6 +140,9 @@ op list_pets(
 
   /** Only pets with every one of these tags. */
   @query(#{ explode: true }) tag?: string[],
+
+  /** Only these ids, comma-separated (`ids=p1,p2`): an array that is not exploded. */
+  @query ids?: PetId[],
 
   /** The most pets to answer. */
   @query @minValue(1) @maxValue(100) limit?: uint32,
@@ -118,6 +154,9 @@ op list_pets(
 op create_pet(@body pet: NewPet): {
   @statusCode _: 201;
   @header location: string;
+
+  /** The name the pet was given, when it was changed on the way in. */
+  @header("x-given-name") givenName?: string;
   @body body: Pet;
 } | Unprocessable;
 
@@ -126,9 +165,17 @@ op create_pet(@body pet: NewPet): {
 @summary("Read one pet.")
 op get_pet(@path id: PetId, @header("x-request-id") request_id?: string): Pet | NotFound;
 
+/** The note is optional: a touch without one only marks the pet as seen. */
+#deprecated "Kept for old clients: read the pet instead."
+@route("/pets/{id}/touch")
+@post
+@summary("Touch a pet.")
+op touch_pet(@path id: PetId, @body note?: Note): Pet | NotFound;
+
 /** Only an administrator may. The scope is for the server to enforce: the contract carries it, whatever it means. */
 @route("/pets/{id}")
 @delete
+@tag("admin")
 @extension("x-scope", "admin")
 @summary("Remove a pet.")
 op delete_pet(@path id: PetId): { @statusCode _: 204 } | NotFound;

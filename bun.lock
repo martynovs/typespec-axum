@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "typespec-axum",
+      "name": "@martynovs/typespec-axum",
       "devDependencies": {
         "@types/node": "^22.0.0",
         "@typespec/compiler": "1.17.0",

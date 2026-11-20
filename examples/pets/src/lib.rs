@@ -1,4 +1,4 @@
-//! A pet store served from `main.tsp`: `generated/rust` is what `typespec-axum` wrote, `store` is the handlers.
+//! A pet store served from `main.tsp`: `generated/rust` is what `@martynovs/typespec-axum` wrote, `store` is the handlers.
 #[path = "../generated/rust/axum.rs"]
 pub mod api;
 pub mod store;
