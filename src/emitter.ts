@@ -144,6 +144,7 @@ export class Emitter {
       const wire = (m: (typeof members)[number]) => (typeof m.value === "number" || typeof m.value === "string" ? m.value : m.name);
       const data: EnumMember[] = members.map((m) => ({ doc: this.doc(m, "    "), variant: pascalIdent(m.name), wire: wire(m) }));
       const code = (numeric ? numericEnum : stringEnum)({ doc: this.doc(t), name, members: data });
+      const consts = [...facts(this.program, t, name), ...members.flatMap((m) => facts(this.program, m, name, constPrefix(rustField(m.name))))];
       const schema = {
         description: getDoc(this.program, t),
         oneOf: members.map((m) => ({
@@ -153,7 +154,7 @@ export class Emitter {
           description: getDoc(this.program, m),
         })),
       };
-      return `${code}${constantsImpl(name, facts(this.program, t, name))}\n${manualSchema(name, `serde_json::json!(${JSON.stringify(schema)})`, [])}`;
+      return `${code}${constantsImpl(name, consts)}\n${manualSchema(name, `serde_json::json!(${JSON.stringify(schema)})`, [])}`;
     });
   }
 
@@ -183,7 +184,8 @@ export class Emitter {
           ty: types[i],
         })),
       });
-      return `${code}\n${manualSchema(name, schema, types.flatMap((ty) => schemaDeps(ty, this.config.inlined)))}`;
+      const consts = [...facts(this.program, t, name), ...variants.flatMap(([k, v]) => (typeof k === "string" ? facts(this.program, v, name, constPrefix(rustField(k))) : []))];
+      return `${code}${constantsImpl(name, consts)}\n${manualSchema(name, schema, types.flatMap((ty) => schemaDeps(ty, this.config.inlined)))}`;
     });
   }
 
@@ -201,7 +203,7 @@ export class Emitter {
         const inner = t.indexer.key.name === "integer"
           ? `Vec<${this.rust(t.indexer.value)}>`
           : `std::collections::BTreeMap<String, ${this.rust(t.indexer.value)}>`;
-        return containerNewtype({ doc: this.doc(t), name, inner });
+        return containerNewtype({ doc: this.doc(t), name, inner }) + constantsImpl(name, facts(this.program, t, name));
       }
       const fields = ownAndInherited(t).map((p) => this.field(name, p));
       return structDef({ doc: this.doc(t), name, example: this.exampleList(t).join(", "), fields, consts: facts(this.program, t, name) });

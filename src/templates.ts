@@ -483,6 +483,7 @@ pub enum ${e.name} {
 ${lines(e.variants.map((v) => `    ${pascal(v.name)}(${v.ty}),`))}
 }
 
+${constantsImpl(e.name, e.consts)}
 impl From<${e.name}> for Event {
     fn from(event: ${e.name}) -> Self {
         match event {

@@ -23,12 +23,16 @@ scalar PetId extends string;
 /** What a pet is. */
 enum Species {
   /** Barks. */
+  @summary("Woof")
   dog,
 
   /** Does not. */
   cat,
   bird,
 }
+
+/** How many pets there are of each species, by the species' names. */
+model Census is Record<int32>;
 
 /** A pet in the store. */
 @example(#{ id: "p1", name: "Rex", species: Species.dog, tags: #["good"] })

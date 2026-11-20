@@ -124,10 +124,11 @@ your application's.
 
 | Where | Constants |
 |---|---|
-| a model or scalar `Pet` | `Pet::DESCRIPTION` (`@doc`), `Pet::EXAMPLE` (the first `@example`, as JSON text) |
-| a field `age` of `Pet` | `Pet::AGE_DESCRIPTION`, `AGE_EXAMPLE`, `AGE_MINIMUM`, `AGE_MAXIMUM`, `AGE_MIN_LENGTH`, `AGE_MAX_LENGTH`, `AGE_PATTERN` (each when stated) |
+| a model or scalar `Pet` | `Pet::DESCRIPTION` (`@doc`), `Pet::SUMMARY` (`@summary`), `Pet::EXAMPLE` (the first `@example`, as JSON text) |
+| a field `age` of `Pet` | `Pet::AGE_DESCRIPTION`, `AGE_SUMMARY`, `AGE_EXAMPLE`, `AGE_MINIMUM`, `AGE_MAXIMUM`, `AGE_MIN_LENGTH`, `AGE_MAX_LENGTH`, `AGE_PATTERN` (each when stated) |
 | a constrained scalar `PetId` | `PetId::MIN_LENGTH`, `MAX_LENGTH`, `PATTERN`, `MINIMUM`, `MAXIMUM` |
-| an enum | `Species::DESCRIPTION` |
+| an enum `Species` and its members | `Species::DESCRIPTION`; per member `Species::DOG_DESCRIPTION`, `DOG_SUMMARY` |
+| a union `PetEvent` and its named variants, a container (`model X is Record<T>`) | the same: `PetEvent::DESCRIPTION`, `PetEvent::CHANGED_DESCRIPTION`; the `@events` enum of an operation's stream has them too (`petstore::PetEvent::GONE_DESCRIPTION`) |
 | an operation `list_pets` | `list_pets::SUMMARY`, `list_pets::DESCRIPTION`; per parameter `list_pets::LIMIT_MAXIMUM`, `LIMIT_DESCRIPTION`, ... |
 
 A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is a `usize`; text is a `&'static str`.

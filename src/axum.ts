@@ -4,7 +4,7 @@ import { isMetadata, type HttpOperation, type HttpService } from "@typespec/http
 import { getExtensions, resolveInfo } from "@typespec/openapi";
 import { getStreamOf } from "@typespec/streams";
 import { getContentType } from "@typespec/events";
-import { constPrefix, constraints, facts, q, rustField as field, rustStr, schemaDeps, schemaExpr, type Config, type DocResponse, type Events, type Op } from "./common.js";
+import { constPrefix, constraints, facts, q, rustField as field, schemaDeps, schemaExpr, type Config, type DocResponse, type Events, type Op } from "./common.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, generatedNotice, manualSchema, operationModule } from "./templates.js";
 
 /** The `Answer` variant of each success or redirect status. A status of 400 or more is a refusal, which no variant holds. */
@@ -92,6 +92,7 @@ function readOp(program: Program, config: Config, { rust, untyped }: Types, prob
         const u = stream as Union;
         events = {
           name: u.name!,
+          consts: [...facts(program, u, ""), ...[...u.variants.entries()].flatMap(([k, v]) => facts(program, v, "", constPrefix(field(String(k)))))],
           variants: [...u.variants.entries()].map(([k, v]) => ({
             name: String(k), ty: rust(v.type),
             plain: getContentType(program, v) === "text/plain",
@@ -124,10 +125,7 @@ function readOp(program: Program, config: Config, { rust, untyped }: Types, prob
     answers, events,
     summary, description,
     docParams, docResponses,
-    consts: [
-      ...(summary ? [{ name: "SUMMARY", ty: "&'static str", value: rustStr(summary) }] : []),
-      ...(description ? [{ name: "DESCRIPTION", ty: "&'static str", value: rustStr(description) }] : []),
-    ],
+    consts: facts(program, op.operation, ""),
   };
 }
 

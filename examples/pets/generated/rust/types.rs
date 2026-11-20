@@ -17,11 +17,14 @@ pub enum Species {
 }
 impl Species {
     pub const DESCRIPTION: &'static str = r#"What a pet is."#;
+    pub const DOG_SUMMARY: &'static str = r#"Woof"#;
+    pub const DOG_DESCRIPTION: &'static str = r#"Barks."#;
+    pub const CAT_DESCRIPTION: &'static str = r#"Does not."#;
 }
 
 impl utoipa::PartialSchema for Species {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        serde_json::from_value(serde_json::json!({"description":"What a pet is.","oneOf":[{"type":"string","enum":["dog"],"description":"Barks."},{"type":"string","enum":["cat"],"description":"Does not."},{"type":"string","enum":["bird"]}]})).expect("the Species schema is valid")
+        serde_json::from_value(serde_json::json!({"description":"What a pet is.","oneOf":[{"type":"string","enum":["dog"],"title":"Woof","description":"Barks."},{"type":"string","enum":["cat"],"description":"Does not."},{"type":"string","enum":["bird"]}]})).expect("the Species schema is valid")
     }
 }
 
@@ -140,6 +143,15 @@ fn schema_newpet_age() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema
         .expect("the literal schema is valid")
 }
 
+/// How many pets there are of each species, by the species' names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(transparent)]
+pub struct Census(pub std::collections::BTreeMap<String, i32>);
+impl Census {
+    pub const DESCRIPTION: &'static str =
+        r#"How many pets there are of each species, by the species' names."#;
+}
+
 /// A pet that barks: everything a `Pet` is, and how loudly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Dog {
@@ -171,6 +183,11 @@ impl Dog {
 pub enum PetEvent {
     Changed(Pet),
     Gone(String),
+}
+impl PetEvent {
+    pub const DESCRIPTION: &'static str = r#"What happens to a pet, as it happens."#;
+    pub const CHANGED_DESCRIPTION: &'static str = r#"The pet as it is now."#;
+    pub const GONE_DESCRIPTION: &'static str = r#"Why the feed ended, as text."#;
 }
 
 impl utoipa::PartialSchema for PetEvent {

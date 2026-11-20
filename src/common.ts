@@ -1,5 +1,5 @@
 /** What the emitter's files share: the operation data, JSON Schema helpers and TypeSpec constraints. */
-import { getDoc, getExamples, getMaxLength, getMaxValue, getMinLength, getMinValue, getPattern, serializeValueAsJson, type Program, type Type } from "@typespec/compiler";
+import { getDoc, getExamples, getSummary, getMaxLength, getMaxValue, getMinLength, getMinValue, getPattern, serializeValueAsJson, type Program, type Type } from "@typespec/compiler";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // What the emitter reads from an operation, before any Rust is written
@@ -37,7 +37,7 @@ export interface Answer {
 }
 
 export interface EventVariant { name: string; ty: string; plain: boolean }
-export interface Events { name: string; variants: EventVariant[] }
+export interface Events { name: string; variants: EventVariant[]; consts: Const[] }
 
 export interface Param {
   name: string;
@@ -156,8 +156,8 @@ export function constraints(program: Program, p: Type): string[] {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * The constants for one target: its constraints (`MINIMUM`, `MAXIMUM`, `MIN_LENGTH`, `MAX_LENGTH`, `PATTERN`), its doc (`DESCRIPTION`)
- * and its first `@example` (`EXAMPLE`, as JSON text), each named `prefix` + that. `ty` is the Rust type of the value the target
+ * The constants for one target: its constraints (`MINIMUM`, `MAXIMUM`, `MIN_LENGTH`, `MAX_LENGTH`, `PATTERN`), its `@summary`
+ * (`SUMMARY`), its doc (`DESCRIPTION`) and its first `@example` (`EXAMPLE`, as JSON text), each named `prefix` + that. `ty` is the Rust type of the value the target
  * describes, which a bound takes the type of.
  */
 export function facts(program: Program, target: Type, ty: string, prefix = ""): Const[] {
@@ -174,6 +174,8 @@ export function facts(program: Program, target: Type, ty: string, prefix = ""): 
     if (typeof stated[rule] === "number") out.push({ name: prefix + name, ty: "usize", value: String(stated[rule]) });
   }
   if (typeof stated.pattern === "string") out.push({ name: prefix + "PATTERN", ty: "&'static str", value: rustStr(stated.pattern) });
+  const summary = getSummary(program, target);
+  if (summary) out.push({ name: prefix + "SUMMARY", ty: "&'static str", value: rustStr(summary) });
   const doc = getDoc(program, target);
   if (doc) out.push({ name: prefix + "DESCRIPTION", ty: "&'static str", value: rustStr(doc) });
   const examples = getExamples(program, target as any);

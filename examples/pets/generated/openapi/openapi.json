@@ -265,6 +265,14 @@
   },
   "components": {
     "schemas": {
+      "Census": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "description": "How many pets there are of each species, by the species' names."
+      },
       "Dog": {
         "type": "object",
         "required": [

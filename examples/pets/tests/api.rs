@@ -264,6 +264,25 @@ fn contract_facts_are_constants() {
         "Only this species."
     );
     assert_eq!(Pet::AGE_DESCRIPTION, "Absent while nobody knows.");
+    // Enum members, union variants and containers carry theirs too.
+    use pets_example::types::{Census, PetEvent, Species};
+    assert_eq!(
+        (
+            Species::DESCRIPTION,
+            Species::DOG_DESCRIPTION,
+            Species::DOG_SUMMARY
+        ),
+        ("What a pet is.", "Barks.", "Woof")
+    );
+    assert_eq!(PetEvent::CHANGED_DESCRIPTION, "The pet as it is now.");
+    assert_eq!(
+        petstore::PetEvent::GONE_DESCRIPTION,
+        "Why the feed ended, as text."
+    );
+    assert_eq!(
+        Census::DESCRIPTION,
+        "How many pets there are of each species, by the species' names."
+    );
     // An example is JSON text of the type it is an example of.
     let pet: Pet = serde_json::from_str(Pet::EXAMPLE).expect("the example is a pet");
     assert_eq!(pet.name, "Rex");

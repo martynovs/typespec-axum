@@ -810,6 +810,12 @@ pub mod petstore {
         Gone(String),
     }
 
+    impl PetEvent {
+        pub const DESCRIPTION: &'static str = r#"What happens to a pet, as it happens."#;
+        pub const CHANGED_DESCRIPTION: &'static str = r#"The pet as it is now."#;
+        pub const GONE_DESCRIPTION: &'static str = r#"Why the feed ended, as text."#;
+    }
+
     impl From<PetEvent> for Event {
         fn from(event: PetEvent) -> Self {
             match event {
@@ -879,6 +885,7 @@ pub mod petstore {
             pet_events::run
         ),
         components(schemas(
+            crate::types::Census,
             crate::types::Pet,
             crate::types::Dog,
             crate::types::NewPet,
