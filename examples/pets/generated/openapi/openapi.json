@@ -1,0 +1,418 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Pet store",
+    "version": "1.0.0",
+    "description": "A small pet store: every kind of parameter, body and answer the emitter writes."
+  },
+  "tags": [],
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "list_pets",
+        "summary": "List pets.",
+        "description": "Pets of one species, or tagged with all of `tag`, a page at a time.",
+        "parameters": [
+          {
+            "name": "species",
+            "in": "query",
+            "required": false,
+            "description": "Only this species.",
+            "schema": {
+              "$ref": "#/components/schemas/Species"
+            },
+            "explode": false
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "description": "Only pets with every one of these tags.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "The most pets to answer.",
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "explode": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PetPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_pet",
+        "summary": "Add a pet.",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "The request has succeeded and a new resource has been created as a result.",
+            "headers": {
+              "location": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pet"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Failure"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPet"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pets/{id}": {
+      "get": {
+        "operationId": "get_pet",
+        "summary": "Read one pet.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PetId"
+            }
+          },
+          {
+            "name": "x-request-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pet"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Failure"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_pet",
+        "summary": "Remove a pet.",
+        "description": "Only an administrator may. The scope is for the server to enforce: the contract carries it, whatever it means.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PetId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "There is no content to send for this request, but the headers may be useful. "
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Failure"
+                }
+              }
+            }
+          }
+        },
+        "x-scope": "admin"
+      }
+    },
+    "/pets/{id}/events": {
+      "get": {
+        "operationId": "pet_events",
+        "summary": "Follow one pet.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PetId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "event"
+                  ],
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "data": {
+                          "contentMediaType": "application/json",
+                          "contentSchema": {
+                            "$ref": "#/components/schemas/Pet"
+                          }
+                        },
+                        "event": {
+                          "const": "changed"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "contentMediaType": "text/plain",
+                          "contentSchema": {
+                            "type": "string"
+                          }
+                        },
+                        "event": {
+                          "const": "gone"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Failure"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Dog": {
+        "type": "object",
+        "required": [
+          "loud"
+        ],
+        "properties": {
+          "loud": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Pet"
+          }
+        ],
+        "description": "A pet that barks: everything a `Pet` is, and how loudly."
+      },
+      "Failure": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable word to branch on."
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "description": "Why a request was refused."
+      },
+      "NewPet": {
+        "type": "object",
+        "required": [
+          "name",
+          "species"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "species": {
+            "$ref": "#/components/schemas/Species"
+          },
+          "age": {
+            "type": "integer",
+            "format": "uint8"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "What it takes to add a pet."
+      },
+      "Pet": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "species",
+          "tags"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/PetId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "age": {
+            "type": "integer",
+            "format": "uint8",
+            "description": "Absent while nobody knows."
+          },
+          "species": {
+            "$ref": "#/components/schemas/Species"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "A pet in the store.",
+        "examples": [
+          {
+            "id": "p1",
+            "name": "Rex",
+            "species": "dog",
+            "tags": [
+              "good"
+            ]
+          }
+        ]
+      },
+      "PetEvent": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Pet"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "description": "What happens to a pet, as it happens."
+      },
+      "PetId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "The id of a pet, issued by the store."
+      },
+      "PetPage": {
+        "type": "object",
+        "required": [
+          "pets"
+        ],
+        "properties": {
+          "pets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pet"
+            }
+          },
+          "next": {
+            "type": "string",
+            "description": "Where the next page begins, absent on the last."
+          }
+        },
+        "description": "One page of pets."
+      },
+      "Species": {
+        "type": "string",
+        "enum": [
+          "dog",
+          "cat",
+          "bird"
+        ],
+        "description": "What a pet is."
+      }
+    }
+  }
+}
