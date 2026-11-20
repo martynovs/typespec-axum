@@ -1,5 +1,7 @@
 # typespec-axum
 
+[![CI](https://github.com/martynovs/typespec-axum/actions/workflows/ci.yml/badge.svg)](https://github.com/martynovs/typespec-axum/actions/workflows/ci.yml)
+
 A [TypeSpec](https://typespec.io) emitter that writes Rust straight from the contract: **serde wire types**, **axum endpoints** and the
 **OpenAPI document** of the same contract, built with [utoipa](https://docs.rs/utoipa). No OpenAPI file in the middle, so
 the handlers, the types and the served document cannot drift apart.
