@@ -117,6 +117,21 @@ Also generated, per contract (namespace):
 Every `x-*` extension on an operation (`@extension("x-scope", "admin")`) is in its `Route::extensions` as `{ name, json }` and in the
 document: the contract carries it, your server decides what it means (authorization, rate limits, ...).
 
+## Constants
+
+What the contract states is also a value Rust can read. Nothing is checked for you: whether to validate, and what a refusal looks like, is
+your application's.
+
+| Where | Constants |
+|---|---|
+| a model or scalar `Pet` | `Pet::DESCRIPTION` (`@doc`), `Pet::EXAMPLE` (the first `@example`, as JSON text) |
+| a field `age` of `Pet` | `Pet::AGE_DESCRIPTION`, `AGE_EXAMPLE`, `AGE_MINIMUM`, `AGE_MAXIMUM`, `AGE_MIN_LENGTH`, `AGE_MAX_LENGTH`, `AGE_PATTERN` (each when stated) |
+| a constrained scalar `PetId` | `PetId::MIN_LENGTH`, `MAX_LENGTH`, `PATTERN`, `MINIMUM`, `MAXIMUM` |
+| an enum | `Species::DESCRIPTION` |
+| an operation `list_pets` | `list_pets::SUMMARY`, `list_pets::DESCRIPTION`; per parameter `list_pets::LIMIT_MAXIMUM`, `LIMIT_DESCRIPTION`, ... |
+
+A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is a `usize`; text is a `&'static str`.
+
 ## How TypeSpec maps
 
 | TypeSpec | Rust |
@@ -127,7 +142,7 @@ document: the contract carries it, your server decides what it means (authorizat
 | `scalar X extends string` | `struct X(pub String)`, so the document keeps the name |
 | `T[]`, `Record<T>` | `Vec<T>`, `BTreeMap<String, T>` (a named `model X is Record<T>` is a newtype) |
 | `int8` ... `uint64`, `float32/64` | `i8` ... `u64`, `f32/f64` (`format` kept: `uint32` stays `uint32` in the document) |
-| `@minValue`, `@maxLength`, `@pattern`, `@example`, `@doc`, `@summary` | in the document (`#[schema(..)]`, doc comments) |
+| `@minValue`, `@maxValue`, `@minLength`, `@maxLength`, `@pattern`, `@example`, `@doc`, `@summary` | in the document, and as [constants](#constants) |
 | `@path` / `@query` / `@header` | `Input` fields: `String`, `Option<String>`, `Vec<String>` for a repeated query (`explode`) |
 | `@body` | `Input::body`, decoded as JSON; a body that does not decode is refused with the operation's `400` (else `422`) |
 | `200..=399` response | a variant of `Answer`, with a struct for the headers it sets |

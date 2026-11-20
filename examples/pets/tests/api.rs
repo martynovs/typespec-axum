@@ -246,6 +246,46 @@ fn model_that_extends_another_has_its_fields() {
     assert_eq!((dog.name.as_str(), dog.loud), ("Rex", true));
 }
 
+#[test]
+fn contract_facts_are_constants() {
+    use pets_example::types::{NewPet, Pet, PetId};
+    assert_eq!((PetId::MIN_LENGTH, PetId::MAX_LENGTH), (1, 64));
+    assert_eq!(NewPet::NAME_MIN_LENGTH, 1);
+    assert_eq!(
+        (
+            petstore::list_pets::LIMIT_MINIMUM,
+            petstore::list_pets::LIMIT_MAXIMUM
+        ),
+        (1, 100)
+    );
+    assert_eq!(petstore::list_pets::SUMMARY, "List pets.");
+    assert_eq!(
+        petstore::list_pets::SPECIES_DESCRIPTION,
+        "Only this species."
+    );
+    assert_eq!(Pet::AGE_DESCRIPTION, "Absent while nobody knows.");
+    // An example is JSON text of the type it is an example of.
+    let pet: Pet = serde_json::from_str(Pet::EXAMPLE).expect("the example is a pet");
+    assert_eq!(pet.name, "Rex");
+}
+
+#[tokio::test]
+async fn limit_outside_the_contracts_bounds_is_refused() {
+    let app = app();
+    for limit in ["0", "101", "x"] {
+        assert_eq!(
+            send(&app, Method::GET, &format!("/pets?limit={limit}"), None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        send(&app, Method::GET, "/pets?limit=100", None).await.0,
+        StatusCode::OK
+    );
+}
+
 fn facts(document: &Value) -> BTreeSet<String> {
     let mut facts = BTreeSet::new();
     for (path, item) in document["paths"].as_object().expect("paths") {

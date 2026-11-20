@@ -1,8 +1,8 @@
 /** Reads TypeSpec types and writes the Rust type each one is: the wire types of `types.rs`. */
 import { getDoc, getSummary, getExamples, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
-import { constraintValues, constraints, q, rustField, schemaDeps, schemaExpr, type Config } from "./common.js";
+import { constPrefix, constraintValues, constraints, facts, q, rustField, schemaDeps, schemaExpr, type Config } from "./common.js";
 import {
-  containerNewtype, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion,
+  constantsImpl, containerNewtype, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion,
   type EnumMember, type StructField,
 } from "./templates.js";
 
@@ -127,10 +127,11 @@ export class Emitter {
         attr: constrained ? "" : this.schemaAttr(t).trim(),
         schema: !constrained,
       });
-      if (!constrained) return code;
+      const consts = constantsImpl(name, facts(this.program, t, base));
+      if (!constrained) return `${code}${consts}`;
       const description = getDoc(this.program, t);
       const sets = Object.entries({ ...stated, ...(description ? { description } : {}) }).map(([key, value]) => `schema[${q(key)}] = json!(${JSON.stringify(value)});`);
-      return `${code}\n${manualSchema(name, `{ let mut schema = ${schemaExpr(base, this.config.inlined)}; ${sets.join(" ")} schema }`, [])}`;
+      return `${code}${consts}\n${manualSchema(name, `{ let mut schema = ${schemaExpr(base, this.config.inlined)}; ${sets.join(" ")} schema }`, [])}`;
     });
   }
 
@@ -152,7 +153,7 @@ export class Emitter {
           description: getDoc(this.program, m),
         })),
       };
-      return `${code}\n${manualSchema(name, `serde_json::json!(${JSON.stringify(schema)})`, [])}`;
+      return `${code}${constantsImpl(name, facts(this.program, t, name))}\n${manualSchema(name, `serde_json::json!(${JSON.stringify(schema)})`, [])}`;
     });
   }
 
@@ -203,7 +204,7 @@ export class Emitter {
         return containerNewtype({ doc: this.doc(t), name, inner });
       }
       const fields = ownAndInherited(t).map((p) => this.field(name, p));
-      return structDef({ doc: this.doc(t), name, example: this.exampleList(t).join(", "), fields });
+      return structDef({ doc: this.doc(t), name, example: this.exampleList(t).join(", "), fields, consts: facts(this.program, t, name) });
     });
   }
 
@@ -224,7 +225,7 @@ export class Emitter {
       ...(plainOptional ? [`value_type = ${ty}`, "required = false"] : []),
       ...(p.defaultValue ? [`default = json!(${JSON.stringify(serializeValueAsJson(this.program, p.defaultValue, p.type))})`] : []),
     ];
-    return { doc: this.doc(p, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional };
+    return { doc: this.doc(p, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional, consts: facts(this.program, p, ty, constPrefix(rustField(p.name))) };
   }
 
   /**

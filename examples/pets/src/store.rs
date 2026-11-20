@@ -48,17 +48,17 @@ impl Store {
         _parts: Parts,
         input: list_pets::Input,
     ) -> Result<list_pets::Answer, Refused> {
-        let limit = match input.limit.as_deref().map(str::parse::<usize>) {
-            Some(Ok(limit)) if (1..=100).contains(&limit) => limit,
+        // The bounds are the contract's (`@minValue`, `@maxValue`), as constants of the operation.
+        let bounds = list_pets::LIMIT_MINIMUM..=list_pets::LIMIT_MAXIMUM;
+        let limit = match input.limit.as_deref().map(str::parse::<u32>) {
+            Some(Ok(limit)) if bounds.contains(&limit) => limit,
             Some(_) => {
-                return Err(refusal(
-                    StatusCode::BAD_REQUEST,
-                    "bad_limit",
-                    "limit is 1 to 100".to_owned(),
-                ));
+                let message = format!("limit is {} to {}", bounds.start(), bounds.end());
+                return Err(refusal(StatusCode::BAD_REQUEST, "bad_limit", message));
             }
-            None => 100,
+            None => *bounds.end(),
         };
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let pets = self.pets.lock().expect("the pets lock");
         let pets = pets
             .values()

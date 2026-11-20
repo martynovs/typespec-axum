@@ -15,6 +15,9 @@ pub enum Species {
     #[serde(rename = "bird")]
     Bird,
 }
+impl Species {
+    pub const DESCRIPTION: &'static str = r#"What a pet is."#;
+}
 
 impl utoipa::PartialSchema for Species {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -35,6 +38,11 @@ pub struct PetPage {
     pub next: Option<String>,
 }
 
+impl PetPage {
+    pub const DESCRIPTION: &'static str = r#"One page of pets."#;
+    pub const NEXT_DESCRIPTION: &'static str = r#"Where the next page begins, absent on the last."#;
+}
+
 /// A pet in the store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(example = json!({"id":"p1","name":"Rex","species":"dog","tags":["good"]}))]
@@ -53,10 +61,21 @@ pub struct Pet {
     pub tags: Vec<String>,
 }
 
+impl Pet {
+    pub const DESCRIPTION: &'static str = r#"A pet in the store."#;
+    pub const EXAMPLE: &'static str = r#"{"id":"p1","name":"Rex","species":"dog","tags":["good"]}"#;
+    pub const AGE_DESCRIPTION: &'static str = r#"Absent while nobody knows."#;
+}
+
 /// The id of a pet, issued by the store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PetId(pub String);
+impl PetId {
+    pub const MIN_LENGTH: usize = 1;
+    pub const MAX_LENGTH: usize = 64;
+    pub const DESCRIPTION: &'static str = r#"The id of a pet, issued by the store."#;
+}
 
 impl utoipa::PartialSchema for PetId {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -90,6 +109,11 @@ pub struct Failure {
     pub message: String,
 }
 
+impl Failure {
+    pub const DESCRIPTION: &'static str = r#"Why a request was refused."#;
+    pub const CODE_DESCRIPTION: &'static str = r#"A stable word to branch on."#;
+}
+
 /// What it takes to add a pet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NewPet {
@@ -104,6 +128,11 @@ pub struct NewPet {
     #[schema(value_type = Vec<String>, required = false)]
     #[serde(rename = "tags", default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+}
+
+impl NewPet {
+    pub const DESCRIPTION: &'static str = r#"What it takes to add a pet."#;
+    pub const NAME_MIN_LENGTH: usize = 1;
 }
 
 fn schema_newpet_age() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -128,6 +157,12 @@ pub struct Dog {
     pub tags: Vec<String>,
     #[serde(rename = "loud")]
     pub loud: bool,
+}
+
+impl Dog {
+    pub const DESCRIPTION: &'static str =
+        r#"A pet that barks: everything a `Pet` is, and how loudly."#;
+    pub const AGE_DESCRIPTION: &'static str = r#"Absent while nobody knows."#;
 }
 
 /// What happens to a pet, as it happens.

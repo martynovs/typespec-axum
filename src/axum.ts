@@ -4,7 +4,7 @@ import { isMetadata, type HttpOperation, type HttpService } from "@typespec/http
 import { getExtensions, resolveInfo } from "@typespec/openapi";
 import { getStreamOf } from "@typespec/streams";
 import { getContentType } from "@typespec/events";
-import { constraints, q, rustField as field, schemaDeps, schemaExpr, type Config, type DocResponse, type Events, type Op } from "./common.js";
+import { constPrefix, constraints, facts, q, rustField as field, rustStr, schemaDeps, schemaExpr, type Config, type DocResponse, type Events, type Op } from "./common.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, generatedNotice, manualSchema, operationModule } from "./templates.js";
 
 /** The `Answer` variant of each success or redirect status. A status of 400 or more is a refusal, which no variant holds. */
@@ -55,6 +55,7 @@ function readOp(program: Program, config: Config, { rust, untyped }: Types, prob
     return {
       name: p.name, kind: p.type, ty: p.param.optional && !ty.startsWith("Option<") ? `Option<${ty}>` : ty,
       description: getDoc(program, p.param), attrs: [...constraints(program, p.param), ...(nullable ? ["nullable"] : [])],
+      consts: facts(program, p.param, ty, constPrefix(field(p.name))),
     };
   });
   const docResponses: DocResponse[] = [];
@@ -112,6 +113,8 @@ function readOp(program: Program, config: Config, { rust, untyped }: Types, prob
   }
   if (!answers.length) throw new Error(`${route}: operation ${id} has no answer`);
   const b = op.parameters.body;
+  const summary = getSummary(program, op.operation);
+  const description = getDoc(program, op.operation);
   return {
     id, trait: pascal(id), path: op.path, method: op.verb,
     extensions: [...getExtensions(program, op.operation)].map(([name, json]) => ({ name, json })),
@@ -119,8 +122,12 @@ function readOp(program: Program, config: Config, { rust, untyped }: Types, prob
     // A body that does not decode is refused with the status the operation lists for it.
     inputRefusal: [400, 422].find((status) => refused.has(status)),
     answers, events,
-    summary: getSummary(program, op.operation), description: getDoc(program, op.operation),
+    summary, description,
     docParams, docResponses,
+    consts: [
+      ...(summary ? [{ name: "SUMMARY", ty: "&'static str", value: rustStr(summary) }] : []),
+      ...(description ? [{ name: "DESCRIPTION", ty: "&'static str", value: rustStr(description) }] : []),
+    ],
   };
 }
 

@@ -224,6 +224,15 @@ pub mod petstore {
     pub mod list_pets {
         use super::*;
 
+        pub const SUMMARY: &'static str = r#"List pets."#;
+        pub const DESCRIPTION: &'static str =
+            r#"Pets of one species, or tagged with all of `tag`, a page at a time."#;
+        pub const SPECIES_DESCRIPTION: &'static str = r#"Only this species."#;
+        pub const TAG_DESCRIPTION: &'static str = r#"Only pets with every one of these tags."#;
+        pub const LIMIT_MINIMUM: u32 = 1;
+        pub const LIMIT_MAXIMUM: u32 = 100;
+        pub const LIMIT_DESCRIPTION: &'static str = r#"The most pets to answer."#;
+
         #[derive(Debug)]
         pub struct Input {
             /// How many query pairs name a parameter this operation does not list.
@@ -333,6 +342,8 @@ pub mod petstore {
 
     pub mod create_pet {
         use super::*;
+
+        pub const SUMMARY: &'static str = r#"Add a pet."#;
 
         #[derive(Debug)]
         pub struct Input {
@@ -452,6 +463,8 @@ pub mod petstore {
 
         /// Where `id` sits in `/pets/{id}`: its index among the path's `/`-separated texts, the empty text before the first `/` being 0.
         const ID_SEGMENT: usize = 2;
+        pub const SUMMARY: &'static str = r#"Remove a pet."#;
+        pub const DESCRIPTION: &'static str = r#"Only an administrator may. The scope is for the server to enforce: the contract carries it, whatever it means."#;
 
         #[derive(Debug)]
         pub struct Input {
@@ -567,6 +580,7 @@ pub mod petstore {
 
         /// Where `id` sits in `/pets/{id}`: its index among the path's `/`-separated texts, the empty text before the first `/` being 0.
         const ID_SEGMENT: usize = 2;
+        pub const SUMMARY: &'static str = r#"Read one pet."#;
 
         #[derive(Debug)]
         pub struct Input {
@@ -686,6 +700,7 @@ pub mod petstore {
 
         /// Where `id` sits in `/pets/{id}/events`: its index among the path's `/`-separated texts, the empty text before the first `/` being 0.
         const ID_SEGMENT: usize = 2;
+        pub const SUMMARY: &'static str = r#"Follow one pet."#;
 
         #[derive(Debug)]
         pub struct Input {

@@ -2,7 +2,7 @@
  * The Rust the emitter writes, as templates: each function takes data the emitter already worked out and returns a fragment
  * with its line breaks where they belong. No decision about the contract is made here; `rustfmt` lays out whatever is written.
  */
-import { q, type Answer, type Config, type Events, type Op } from "./common.js";
+import { q, type Answer, type Config, type Const, type Events, type Op } from "./common.js";
 
 const lines = (items: string[]) => items.join("\n");
 
@@ -37,16 +37,21 @@ ${lines([...new Set(deps)].map((d) => `        <${d} as utoipa::ToSchema>::schem
     }` : ""}
 }`;
 
-export interface StructField { doc: string; attr: string; serde: string; ident: string; ty: string; optional: boolean }
+export interface StructField { doc: string; attr: string; serde: string; ident: string; ty: string; optional: boolean; consts: Const[] }
+
+/** The associated constants of a type, or nothing when it has none. */
+export const constantsImpl = (name: string, consts: Const[]) =>
+  consts.length ? `\nimpl ${name} {\n${lines(consts.map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}\n}\n` : "";
 
 /** An optional field (`name?: T`) is absent when it has no value, never `null`. */
 const structField = (f: StructField) => `${f.doc}${f.attr}    #[serde(rename = ${q(f.serde)}${f.optional ? ', default, skip_serializing_if = "Option::is_none"' : ""})]
     pub ${f.ident}: ${f.ty},`;
 
-export const structDef = (s: { doc: string; name: string; example?: string; fields: StructField[] }) => `${s.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+export const structDef = (s: { doc: string; name: string; example?: string; fields: StructField[]; consts: Const[] }) => `${s.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 ${s.example ? `#[schema(${s.example})]\n` : ""}pub struct ${s.name} {
 ${lines(s.fields.map(structField))}
-}`;
+}
+${constantsImpl(s.name, [...s.consts, ...s.fields.flatMap((f) => f.consts)])}`;
 
 /** `model X is Record<T>` or `T[]`: a newtype over the map or the list. */
 export const containerNewtype = (c: { doc: string; name: string; inner: string }) => `${c.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -424,6 +429,7 @@ ${operationTrait(o)}
 pub mod ${o.id} {
     use super::*;
 ${segmentConsts(o)}
+${lines([...o.consts, ...o.docParams.flatMap((p) => p.consts)].map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}
 
     #[derive(Debug)]
     pub struct Input {
