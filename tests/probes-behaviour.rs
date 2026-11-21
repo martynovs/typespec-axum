@@ -325,7 +325,7 @@ fn extensions_become_constants_the_operation_reports() {
 async fn unreadable_requests_are_refused_through_the_applications_function() {
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
-    use probes::reject_with::api::probe::{list_400, list_401, list_422, list_none, ListNone, List400, List401, List422, mount};
+    use probes::reject_with::api::probe::{list_400, list_401, list_422, list_none, list_text_and_401, list_text_400, list_bare_400_and_401, list_bare_400, ListNone, List400, List401, List422, ListTextAnd401, ListText400, ListBare400And401, ListBare400, mount};
     use tower::ServiceExt;
 
     struct Api;
@@ -342,6 +342,10 @@ async fn unreadable_requests_are_refused_through_the_applications_function() {
     echo!(List422, list_422_handler, list_422);
     echo!(List401, list_401_handler, list_401);
     echo!(ListNone, list_none_handler, list_none);
+    echo!(ListTextAnd401, list_text_and_401_handler, list_text_and_401);
+    echo!(ListText400, list_text_400_handler, list_text_400);
+    echo!(ListBare400And401, list_bare_400_and_401_handler, list_bare_400_and_401);
+    echo!(ListBare400, list_bare_400_handler, list_bare_400);
 
     let app = mount(axum::Router::new(), &Api);
     let ask = |path: &'static str, body: &'static str| {
@@ -358,6 +362,15 @@ async fn unreadable_requests_are_refused_through_the_applications_function() {
     assert_eq!(ask("/a/x", "{").await, (StatusCode::BAD_REQUEST, "rejected 400: the request body does not match the API contract".to_owned()));
     assert_eq!(ask("/b", "{\"n\":\"x\"}").await.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(ask("/c", "{}").await.0, StatusCode::UNAUTHORIZED);
+    // A plain-text 400 or 413 is axum's answer to a body it cannot read, so it is not the status for one that does not decode: the JSON 401 is.
+    assert_eq!(ask("/e", "{").await, (StatusCode::UNAUTHORIZED, "rejected 401: the request body does not match the API contract".to_owned()));
+    // Only a plain-text 400: not a JSON refusal, so axum's own answer as well.
+    let (status, text) = ask("/f", "{").await;
+    assert!(status == StatusCode::BAD_REQUEST && !text.starts_with("rejected"), "{status} {text}");
+    // A bare 400 declares no JSON answer: beside a JSON 401 the 401 is the status, alone it keeps axum's own answer.
+    assert_eq!(ask("/g", "{").await, (StatusCode::UNAUTHORIZED, "rejected 401: the request body does not match the API contract".to_owned()));
+    let (status, text) = ask("/h", "{").await;
+    assert!(status == StatusCode::BAD_REQUEST && !text.starts_with("rejected"), "{status} {text}");
     // None listed: axum's own answer, not the application's function.
     let (status, text) = ask("/d", "{}").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

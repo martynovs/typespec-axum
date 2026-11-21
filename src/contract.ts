@@ -59,7 +59,7 @@ export interface Op {
   bodyOptional: boolean;
   /** The media type the contract states for the body, when it states one. */
   bodyMedia?: string;
-  /** The status a body that does not decode is refused with (400 or 422), when the contract lists one. */
+  /** The status a body that does not decode is refused with (400, 422 or 401), when the contract lists one as JSON; a plain-text refusal is axum's own. */
   inputRefusal?: number;
   answers: Answer[];
   events?: Events;
@@ -200,8 +200,8 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
       };
       if (!c.body) {
         note();
-        if (status >= 400) refused.add(status);
-        else answers.push({ status, variant: variantOf(), media: "", headers });
+        // A refusal with no body declares a status, not a JSON answer: it is not one `reject-with` may produce.
+        if (status < 400) answers.push({ status, variant: variantOf(), media: "", headers });
         continue;
       }
       const media = mediaOf(c.body.contentTypes[0] ?? "application/json");
@@ -234,7 +234,8 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
         if (loose) problems.push(`${route} ${status}: the response carries an untyped value (${loose})`);
         note({ media, ty });
       }
-      if (status >= 400) { refused.add(status); continue; }
+      // A plain-text refusal is axum's own answer to a body it cannot read (400, 413): it is not the status a body that does not decode is refused with.
+      if (status >= 400) { if (media === "application/json") refused.add(status); continue; }
       if (answers.some((a) => a.status === status)) throw new Refusal(`${route}: multiple non-refusal response media for status ${status}`);
       answers.push({ status, variant: variantOf(), ty, media, headers });
     }
@@ -255,7 +256,7 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
     extensions: [...getExtensions(program, op.operation)].map(([name, json]) => ({ name, json })),
     params, body: b ? rust(b.type) : undefined, bodyOptional: !!b?.property?.optional,
     bodyMedia: b && (b as any).contentTypes?.[0] ? mediaOf((b as any).contentTypes[0]) : undefined,
-    // A body that does not decode is refused with the status the operation lists for it.
+    // A body that does not decode is refused with the status the operation lists for it as a JSON answer: a refusal with no body or a plain-text one is not.
     inputRefusal: [400, 422, 401].find((status) => refused.has(status)),
     answers, events,
     summary, description,
