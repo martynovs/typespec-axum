@@ -1,0 +1,11 @@
+type-map.Instant=String
+type-map.Color.path=crate::hand::Color
+type-map.Color.eq=true
+type-map.Limits.path=crate::hand::Limits
+type-map.Limits.eq=true
+type-map.Bounds.path=crate::hand::Bounds
+type-map.Bounds.eq=true
+type-map.Minted=crate::hand::Minted
+type-map.Money.path=crate::hand::Money
+type-map.Money.eq=true
+derive-eq=true

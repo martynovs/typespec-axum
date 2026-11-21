@@ -49,7 +49,7 @@ percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio-stream = { version = "0.1", default-features = false }
-utoipa = "6"
+utoipa = "6"            # not with `document: none`
 ```
 
 ```rust
@@ -137,7 +137,8 @@ A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is 
 
 | TypeSpec | Rust |
 |---|---|
-| `model` | `struct` (`#[serde(rename = ...)]`, snake_case fields, `r#` for keywords); `name?: T` is `Option<T>` that is absent, never `null`; `name?: T \| null` is `Option<Option<T>>`, `None` for absent and `Some(None)` for `null`; `extends` copies the base's fields into the struct (the document lists them flat, where `@typespec/openapi3` writes `allOf`) |
+| `model` | `struct` (`#[serde(rename = ...)]`, snake_case fields, `r#` for keywords); `name?: T` is `Option<T>` that is absent, never `null`; `name?: T \| null` is `Option<Option<T>>`, `None` for absent and `Some(None)` for `null`; `...Record<never>` closes a model (`#[serde(deny_unknown_fields)]`: a property it does not list is refused); `extends` copies the base's fields into the struct (the document lists them flat, where `@typespec/openapi3` writes `allOf`) |
+| `model Envelope<T>` | with `document: none`, one generic `struct Envelope<T>` and each instance `Envelope<Vec<Held>>` (the template's parameters are the types of its fields: `T`, `T[]`, `Record<T>`, or are not used by one; an instance whose argument may be `null`, a template that extends another or uses a parameter in a union is a struct of its own for each instance, `EnvelopeOfArrayOfHeld`, as with a document) |
 | `enum` | string: `enum` with `rename`; numeric: `#[repr(i64)] enum` with the contract's numbers, `wire()` |
 | `union` | `#[serde(untagged)] enum`; `T \| null` is `Option<T>`; a union that is a variant of another is flattened into it (`union B { A, int32 }` has the variants of `A` and `int32`), so no enum holds an enum (a named union of string literals is a string enum of its own, and a variant of a union that also has other types, or the same literals spread into one that has only literals); a union nothing names (`string \| int32`) is one too, numbered (`Anon3`); the document inlines it for a property and refers to it as a component everywhere else. A property typed as a string literal (`kind: "cat"`, or `"a" \| "b"`, with or without `?` and `\| null`) accepts only those values, so an untagged union of models picks its variant by it; a named union of string literals and `null` is a string enum in an `Option`. Numeric and boolean literals (`kind: 1`) are not checked |
 | `decimal`, `decimal128` | `Decimal`, a newtype over `serde_json::Number` written as a JSON number (exact with serde_json's `arbitrary_precision` feature; a float without it); a component `Decimal` of the document |
@@ -175,10 +176,14 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 |---|---|---|
 | `types-path` | `crate::types` | Rust path of the module that holds `types.rs`, from the crate (`crate::...`): `super::` and `self::` are refused, the modules sit at different depths. |
 | `refusal-type` | one defined in `axum.rs` | Rust path of your own `Refused` (`IntoResponse`). The generated one wraps a `Response` and is `From<StatusCode>`. |
-| `max-query-bytes` | `4096` | A longer query string is refused with `400` before it is parsed. |
+| `reject-with` | none | Rust path of `fn(StatusCode, &'static str) -> Refused` (or your `refusal-type`), which makes the refusal of a request that cannot be read: a body that does not decode, a body nested past `max-json-depth`, a body that cannot be read, a query over a bound, a path parameter that is not UTF-8 (all with the first of `400`, `422`, `401` the operation lists, else `400`; a body that does not decode and lists none keeps axum's status) and a body that is not JSON (`415`). Without it each is a `text/plain` answer. |
+| `derive-eq` | `false` | `true` adds `Eq` to every struct, container and union whose parts are all `Eq`: a type with a float (`float32`, `float64`) is left at `PartialEq`, and so is one made of such a type or of a type of the `type-map` whose entry does not say `eq: true` (`String` and the integers need no word). |
+| `max-query-bytes` | `4096` | A longer query string is refused (see `reject-with`: `400` unless the operation lists another) before it is parsed. |
 | `max-query-pairs` | `64` | So are more `&`-separated pairs. |
-| `max-json-depth` | `32` | A JSON body that nests deeper (`{` and `[` outside strings) is refused with `400` before it is parsed. |
-| `document` | `derived` | `derived`: the document is what utoipa's derives write. `typespec`: schemas written by hand to follow `@typespec/openapi3` more closely (enums as `oneOf` per member when `enum-strategy: annotated`, `format: uint8`, ...). |
+| `max-json-depth` | `32` | A JSON body that nests deeper (`{` and `[` outside strings) is refused (see `reject-with`) before it is parsed. |
+| `document` | `derived` | `derived`: the document is what utoipa's derives write. `typespec`: schemas written by hand to follow `@typespec/openapi3` more closely (enums as `oneOf` per member when `enum-strategy: annotated`, `format: uint8`, ...). `none`: no document: no `ApiDoc`, no `document()`, no `ToSchema`, no `#[utoipa::path]`, and the generated code does not use utoipa, so it is not a dependency. |
+| `type-map` | none | Types the application writes itself: a map from the contract's name (`Bounds`, or `Shop::Wire::Bounds`, the namespace in front with `::` (an option's name cannot hold a dot), when more than one namespace has a type of that name: a bare name that is ambiguous is an error) to a Rust path (`crate::wire::Bounds`), or to `{ path, eq }`. The emitter writes no type for it and every reference names the path. For a model, an enum or a scalar (`Instant: String`; a mapped scalar is taken to be `Display`, and a scalar that extends it is `Eq` as its entry says, with no `Hash`); not a union, which is flattened, and not a template. Needs `document: none`: a type the emitter did not write has no schema. An optional field of a mapped type is a plain `Option` of it. A name no type of the contract has is an error. |
+| `extension-expr` | none | Extensions of an operation the application reads at compile time: an extension's name (`x-guard`) to `{ macro, type, const, accessor, required }`. Each operation that states it gets `pub const <const>: <type> = <macro>!(<its JSON>);` in its module, and `Operation` a `const fn <accessor>(&self)` returning a reference to it (`Option<&'static T>`, or `&'static T` when `required`: an operation without it fails the emit). The macro is yours: it matches the JSON as tokens (`"none"`, `{"scope": "read"}`), and a value it does not accept stops your build at that token. `Route::extensions` still carries the raw JSON. |
 | `require-json-content-type` | `true` | A JSON body is read only from a request whose `Content-Type` is `application/json` or `+json` (else `415`), as axum's `Json` does. |
 | `untyped-responses` | `forbid` | `allow` types a response with no named shape as `serde_json::Value` instead of failing the emit. |
 

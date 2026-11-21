@@ -28,6 +28,7 @@ test: generate
 probes: build
     tests/probes.sh
     DOCUMENT=typespec tests/probes.sh
+    DOCUMENT=none tests/probes.sh
 
 # Serve the example on 127.0.0.1:3000.
 serve: generate

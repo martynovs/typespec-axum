@@ -190,7 +190,7 @@ function readOp(program: Program, config: Config, { rust, untyped, displayable }
     params, body: b ? rust(b.type) : undefined, bodyOptional: !!b?.property?.optional,
     bodyMedia: b && (b as any).contentTypes?.[0] ? mediaOf((b as any).contentTypes[0]) : undefined,
     // A body that does not decode is refused with the status the operation lists for it.
-    inputRefusal: [400, 422].find((status) => refused.has(status)),
+    inputRefusal: [400, 422, 401].find((status) => refused.has(status)),
     answers, events,
     summary, description,
     docParams, docResponses,
@@ -259,6 +259,7 @@ export function emitAxum(program: Program, config: Config, types: Types, service
   const problems: string[] = [];
   const seen = new Map<string, { module: string; key: string; id: string }>();
   const modules = new Set<string>();
+  const extensionsUsed = new Set<string>();
   for (const svc of services) {
     if (!getService(program, svc.namespace)) throw new Refusal("the contract has no @service: put its operations in a namespace marked @service");
     // The Rust module is the whole name of the namespace (`Pets.V1` is `pets_v1`), so two services can end in the same word.
@@ -339,7 +340,15 @@ export function emitAxum(program: Program, config: Config, types: Types, service
     for (const name of unions.keys()) {
       if (traits.has(name) || TRAITS.has(name)) throw new Refusal(`${module}: the stream ${name} takes the name of an operation's trait or of a type the generated code uses: rename one in the contract`);
     }
-    const schemaOf = new Map([...unions.values()].map((e) => [e.name, eventSchema(e, config)]));
+    const extensions = [...config.extensionExpr.values()].map((expr) => {
+      const has = new Set(ops.filter((o) => o.extensions.some((e) => e.name === expr.name)).map((o) => o.id));
+      const lacking = ops.filter((o) => !has.has(o.id)).map((o) => o.operationId);
+      if (expr.required && lacking.length) throw new Refusal(`${module}: extension-expr says ${expr.name} is required, and ${lacking.join(", ")} state none`);
+      if (has.size) extensionsUsed.add(expr.name);
+      return { expr, has };
+    });
+    const documented = config.document !== "none";
+    const schemaOf = new Map(documented ? [...unions.values()].map((e) => [e.name, eventSchema(e, config)] as const) : []);
 
     // The document's info is what `@service`, `@summary` and `@info` say; `@info` entries this generator has no attribute for fail here.
     const about = resolveInfo(program, svc.namespace) ?? {};
@@ -351,6 +360,8 @@ export function emitAxum(program: Program, config: Config, types: Types, service
 
     out.push(contractModule({
       module,
+      documented,
+      extensions,
       ops,
       info,
       paths: [...ops.map((o) => `${o.id}::run`), ...shared],
@@ -359,11 +370,20 @@ export function emitAxum(program: Program, config: Config, types: Types, service
       items: [...schemaOf].map(([name, s]) => `(${q(name + "Item")}, ${s.fn}())`),
       operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [
-        ...ops.map((o) => operationModule(o, config)),
-        ...[...unions.values()].flatMap((e) => [eventsEnum(e), schemaOf.get(e.name)!.code]),
+        ...ops.map((o) => {
+          const code = operationModule(o, config);
+          for (const { expr, has } of extensions) {
+            // The constant takes a name of the operation's module: one the module already defines would be defined twice.
+            if (has.has(o.id) && code.split(`pub const ${expr.const}:`).length !== 2) throw new Refusal(`${module}: extension-expr names the constant ${expr.const}, which the module of the operation ${o.id} defines already: name another`);
+          }
+          return code;
+        }),
+        ...[...unions.values()].flatMap((e) => [eventsEnum(e), ...(documented ? [schemaOf.get(e.name)!.code] : [])]),
       ],
     }));
   }
+  const unusedExtensions = [...config.extensionExpr.keys()].filter((name) => !extensionsUsed.has(name));
+  if (unusedExtensions.length) throw new Refusal(`extension-expr: no operation states ${unusedExtensions.join(", ")}`);
   if (problems.length) throw new Refusal(`untyped responses are not generated; name their shape in the contract:\n  ${problems.join("\n  ")}`);
   return out.join("\n");
 }

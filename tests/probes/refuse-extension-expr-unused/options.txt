@@ -1,0 +1,9 @@
+extension-expr.x-guard.macro=crate::hand::guard
+extension-expr.x-guard.type=crate::hand::Guarding
+extension-expr.x-guard.const=GUARDING
+extension-expr.x-guard.accessor=guarding
+extension-expr.x-guard.required=true
+extension-expr.x-guarb.macro=crate::hand::guard
+extension-expr.x-guarb.type=crate::hand::Guarding
+extension-expr.x-guarb.const=OTHER
+extension-expr.x-guarb.accessor=other

@@ -13,19 +13,43 @@ export interface Config {
   typesPath: string;
   /** Rust path of the type a handler refuses with, or undefined for the one `axum.rs` defines. */
   refusalType?: string;
+  /** Rust path of the function that makes the refusal of a request that cannot be read (`fn(StatusCode, &'static str) -> Refused`), or undefined for a text answer. */
+  rejectWith?: string;
+  /** Whether a type derives `Eq` when every part of it is `Eq`. */
+  deriveEq: boolean;
   maxQueryBytes: number;
   maxQueryPairs: number;
   /** How deep the JSON of a request body may nest. */
   maxJsonDepth: number;
   /** Whether a response may carry an untyped `serde_json::Value`. */
   allowUntyped: boolean;
-  /** `typespec`: schemas written by hand to match `@typespec/openapi3` to the letter; `derived`: whatever utoipa's derive writes. */
-  document: "typespec" | "derived";
+  /** `typespec`: schemas written by hand to match `@typespec/openapi3` to the letter; `derived`: whatever utoipa's derive writes; `none`: no document, so no utoipa. */
+  document: "typespec" | "derived" | "none";
   /** Whether a JSON body is read only from a request that says it is JSON. */
   requireJson: boolean;
+  /** Types the contract names that the application writes itself: the contract's name (`Name` or `Namespace.Name`) to the Rust path of the type. */
+  typeMap: ReadonlyMap<string, TypeMapEntry>;
+  /** What a contract's extension becomes in the Rust: a call of the application's macro, evaluated in a const, per operation. */
+  extensionExpr: ReadonlyMap<string, ExtensionExpr>;
   /** Rust names of the types TypeSpec writes out in place wherever they are used (instances of a template). */
   inlined: Set<string>;
 }
+
+/** How an `x-*` extension of an operation is lowered: `const <const>: <type> = <macro>!(<the extension's JSON>);` in the operation's module. */
+export interface ExtensionExpr {
+  /** The extension's name (`x-scope`). */
+  name: string;
+  macro: string;
+  type: string;
+  const: string;
+  /** The method of `Operation` that returns the constant. */
+  accessor: string;
+  /** Whether every operation must state the extension (the accessor then returns the value, not an `Option`). */
+  required: boolean;
+}
+
+/** A type written by hand: where it is, and whether it is `Eq`, which the emitter cannot see. */
+export interface TypeMapEntry { path: string; eq: boolean }
 
 /** A contract the emitter cannot write faithfully: reported to the user as an error of the contract, not as a fault of the emitter. */
 export class Refusal extends Error {}
@@ -112,14 +136,30 @@ export function rustNumber(n: number): string {
   return /[.e]/i.test(text) ? text : `${text}.0`;
 }
 
-/** A JSON value as the Rust source of a `json!` macro argument. */
+/** A string as a Rust string literal: JSON's `\uXXXX` is not Rust's, so a control character is written as `\u{..}`. */
+export function rustString(s: string): string {
+  let out = '"';
+  for (const ch of s) {
+    const code = ch.codePointAt(0)!;
+    if (ch === '"') out += '\\"';
+    else if (ch === "\\") out += "\\\\";
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (code < 0x20 || code === 0x7f) out += `\\u{${code.toString(16)}}`;
+    else out += ch;
+  }
+  return out + '"';
+}
+
+/** A JSON value as the Rust source of a `json!` macro argument, or of the tokens a user's macro matches. */
 export function rustJson(value: unknown): string {
   if (typeof value === "number") return rustNumber(value);
   if (Array.isArray(value)) return `[${value.map(rustJson).join(", ")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)}: ${rustJson(v)}`).join(", ")}}`;
   }
-  return JSON.stringify(value);
+  return typeof value === "string" ? rustString(value) : JSON.stringify(value);
 }
 
 /** A JSON value as a Rust expression that parses it from text: no macro to expand, so no limit on its size. */

@@ -169,14 +169,15 @@ async fn body_that_nests_too_deep_is_refused_before_it_is_parsed() {
         .expect("a response")
         .status();
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    // Deeper than the API accepts is refused before any of it is parsed, whatever it holds.
+    // Deeper than the API accepts is refused before any of it is parsed, whatever it holds, with the status the operation lists for a
+    // body it cannot read.
     let status = app
         .clone()
         .oneshot(post(body(60)))
         .await
         .expect("a response")
         .status();
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     // Brackets in a string are text, not depth.
     let text = format!(r#"{{"name":"{}","species":"dog"}}"#, "[".repeat(200));
     assert_eq!(

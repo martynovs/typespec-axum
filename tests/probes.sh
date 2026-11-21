@@ -10,15 +10,23 @@ mkdir -p "$work/crate/src"
 failed=0
 modules=()
 indent() { tail -8 "$1" | while IFS= read -r line; do echo "    $line"; done; }
+mode=${DOCUMENT:-derived}
 for dir in tests/probes/*/; do
   name=$(basename "$dir")
+  # `only.txt` names the document modes a probe is for (a probe about `type-map` is for `none`).
+  if [ -f "$dir/only.txt" ] && ! grep -qw -- "$mode" "$dir/only.txt"; then continue; fi
+  # `options.txt` holds more emitter options, one `name=value` per line.
+  extra=()
+  if [ -f "$dir/options.txt" ]; then
+    while IFS= read -r line; do [ -n "$line" ] && extra+=(--option "@martynovs/typespec-axum.$line"); done <"$dir/options.txt"
+  fi
   id=${name//-/_}
   out="$work/$name"
   log="$work/$name.log"
   rm -rf "$out"
   if bun x tsp compile "$dir" --emit "$root" --output-dir "$out" \
     --option "@martynovs/typespec-axum.types-path=crate::$id::types" \
-    --option "@martynovs/typespec-axum.document=${DOCUMENT:-derived}" >"$log" 2>&1; then compiled=1; else compiled=0; fi
+    --option "@martynovs/typespec-axum.document=$mode" ${extra[@]+"${extra[@]}"} >"$log" 2>&1; then compiled=1; else compiled=0; fi
   if [ -f "$dir/refuse.txt" ]; then
     want=$(cat "$dir/refuse.txt")
     if [ "$compiled" = 1 ] || ! grep -qF -- "$want" "$log"; then
@@ -35,21 +43,25 @@ for dir in tests/probes/*/; do
 done
 [ "$failed" = 0 ] || exit 1
 
+cp tests/probes-hand.rs "$work/crate/src/hand.rs"
 {
+  echo "pub mod hand;"
   for m in "${modules[@]}"; do
     IFS='|' read -r id module rust <<<"$m"
     echo "pub mod $id { #[path = \"$rust/types.rs\"] pub mod types; #[path = \"$rust/axum.rs\"] pub mod api; }"
   done
-  echo "pub fn documents() -> Vec<(&'static str, serde_json::Value)> { vec!["
-  for m in "${modules[@]}"; do
-    IFS='|' read -r id module rust <<<"$m"
-    echo "  (\"$id\", $id::api::$module::document()),"
-  done
-  echo "] }"
+  if [ "${DOCUMENT:-derived}" != none ]; then
+    echo "pub fn documents() -> Vec<(&'static str, serde_json::Value)> { vec!["
+    for m in "${modules[@]}"; do
+      IFS='|' read -r id module rust <<<"$m"
+      echo "  (\"$id\", $id::api::$module::document()),"
+    done
+    echo "] }"
+  fi
 } >"$work/crate/src/lib.rs"
 mkdir -p "$work/crate/tests"
 cp tests/probes-behaviour.rs "$work/crate/tests/behaviour.rs"
-cat >"$work/crate/tests/documents.rs" <<RS
+[ "${DOCUMENT:-derived}" = none ] || cat >"$work/crate/tests/documents.rs" <<RS
 #[test]
 fn every_probe_builds_its_document() {
     let documents = probes::documents();
@@ -76,7 +88,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", default-features = false }
+tower = { version = "0.5", features = ["util"] }
 utoipa = "6"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(no_document)'] }
 TOML
+if [ "${DOCUMENT:-derived}" = none ]; then
+  # No document means no utoipa: the crate must build without it.
+  grep -v '^utoipa' "$work/crate/Cargo.toml" >"$work/crate/Cargo.toml.new" && mv "$work/crate/Cargo.toml.new" "$work/crate/Cargo.toml"
+  export RUSTFLAGS="-D warnings --cfg no_document"
+else
+  export RUSTFLAGS="-D warnings"
+fi
 [ -f "$work/crate/Cargo.lock" ] || cp examples/pets/Cargo.lock "$work/crate/Cargo.lock"
-RUSTFLAGS="-D warnings" cargo test --manifest-path "$work/crate/Cargo.toml" 2>&1 | tail -25
+cargo test --manifest-path "$work/crate/Cargo.toml" 2>&1 | tail -25

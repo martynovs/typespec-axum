@@ -2,7 +2,7 @@
  * The Rust the emitter writes, as templates: each function takes data the emitter already worked out and returns a fragment
  * with its line breaks where they belong. No decision about the contract is made here; `rustfmt` lays out whatever is written.
  */
-import { lastSegment, q, rustJson, rustStr, type Answer, type Config, type Const, type Events, type Op } from "./common.js";
+import { lastSegment, q, rustJson, rustStr, type Answer, type Config, type Const, type Events, type ExtensionExpr, type Op } from "./common.js";
 
 const lines = (items: string[]) => items.join("\n");
 
@@ -81,22 +81,25 @@ export interface StructField {
   deserialize?: string;
 }
 
+/** Where a type derives `Eq` if `derive-eq` is on and every part of it is: told apart from the other derives once all the types are known (`Emitter.resolveEq`). */
+export const eqMarker = (name: string) => `⟦eq:${name}⟧`;
+
 /** The associated constants of a type, or nothing when it has none. */
-export const constantsImpl = (name: string, consts: Const[]) =>
-  consts.length ? `\nimpl ${name} {\n${lines(consts.map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}\n}\n` : "";
+export const constantsImpl = (name: string, consts: Const[], generics: string[] = []) =>
+  consts.length ? `\nimpl${generics.length ? `<${generics.join(", ")}>` : ""} ${name}${generics.length ? `<${generics.join(", ")}>` : ""} {\n${lines(consts.map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}\n}\n` : "";
 
 /** An optional field (`name?: T`) is absent when it has no value, never `null`. */
 const structField = (f: StructField) => `${f.doc}${f.attr}    #[serde(rename = ${q(f.serde)}${f.optional ? ", default" : ""}${f.deserialize ? `, deserialize_with = ${q(f.deserialize)}` : ""}${f.optional ? ', skip_serializing_if = "Option::is_none"' : ""})]
     pub ${f.ident}: ${f.ty},`;
 
-export const structDef = (s: { doc: string; name: string; example?: string; fields: StructField[]; consts: Const[] }) => `${s.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-${s.example ? `#[schema(${s.example})]\n` : ""}pub struct ${s.name} {
+export const structDef = (s: { doc: string; name: string; generics?: string[]; example?: string; closed: boolean; schema: boolean; fields: StructField[]; consts: Const[] }) => `${s.doc}#[derive(Debug, Clone, PartialEq${eqMarker(s.name)}, Serialize, Deserialize${s.schema ? ", utoipa::ToSchema" : ""})]
+${s.closed ? "#[serde(deny_unknown_fields)]\n" : ""}${s.generics?.length ? `#[serde(bound(serialize = ${q(s.generics.map((g) => `${g}: Serialize`).join(", "))}, deserialize = ${q(s.generics.map((g) => `${g}: Deserialize<'de>`).join(", "))}))]\n` : ""}${s.schema && s.example ? `#[schema(${s.example})]\n` : ""}pub struct ${s.name}${s.generics?.length ? `<${s.generics.join(", ")}>` : ""} {
 ${lines(s.fields.map(structField))}
 }
-${constantsImpl(s.name, [...s.consts, ...s.fields.flatMap((f) => f.consts)])}`;
+${constantsImpl(s.name, [...s.consts, ...s.fields.flatMap((f) => f.consts)], s.generics)}`;
 
 /** `model X is Record<T>` or `T[]`: a newtype over the map or the list. */
-export const containerNewtype = (c: { doc: string; name: string; inner: string; schema: boolean }) => `${c.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize${c.schema ? ", utoipa::ToSchema" : ""})]
+export const containerNewtype = (c: { doc: string; name: string; inner: string; schema: boolean }) => `${c.doc}#[derive(Debug, Clone, PartialEq${eqMarker(c.name)}, Serialize, Deserialize${c.schema ? ", utoipa::ToSchema" : ""})]
 #[serde(transparent)]
 pub struct ${c.name}(pub ${c.inner});`;
 
@@ -147,7 +150,7 @@ ${lines(e.members.map((m) => `            ${m.wire} => Ok(Self::${m.variant}),`)
     }
 }`;
 
-export const untaggedUnion = (u: { doc: string; name: string; variants: { name: string; ty: string }[] }) => `${u.doc}#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+export const untaggedUnion = (u: { doc: string; name: string; variants: { name: string; ty: string }[] }) => `${u.doc}#[derive(Debug, Clone, PartialEq${eqMarker(u.name)}, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ${u.name} {
 ${lines(u.variants.map((v) => (v.ty === "()" ? `    ${v.name},` : `    ${v.name}(${v.ty}),`)))}
@@ -215,21 +218,26 @@ const MAX_QUERY_BYTES: usize = ${c.maxQueryBytes};
 const MAX_QUERY_PAIRS: usize = ${c.maxQueryPairs};
 const MAX_JSON_DEPTH: usize = ${c.maxJsonDepth};
 
-fn query_within_bounds(uri: &axum::http::Uri) -> Result<(), AxResponse> {
+/// The answer to a request that cannot be read: a status and what is wrong with it${c.rejectWith ? `, made by \`${c.rejectWith}\`` : ""}.
+fn reject(status: AxStatusCode, message: &'static str) -> AxResponse {
+${c.rejectWith ? `    ${c.rejectWith}(status, message).into_response()` : "    (status, message).into_response()"}
+}
+
+fn query_within_bounds(uri: &axum::http::Uri) -> Result<(), &'static str> {
     let query = uri.query().unwrap_or("");
     if query.len() > MAX_QUERY_BYTES || query.split('&').count() > MAX_QUERY_PAIRS {
-        return Err((AxStatusCode::BAD_REQUEST, "the query is longer than this API accepts").into_response());
+        return Err("the query is longer than this API accepts");
     }
     Ok(())
 }
 
 /// One path segment as the text it names: percent-decoded, and refused when that is not UTF-8, as axum's \`Path\` refuses it. A segment
 /// with nothing to decode is not copied by the decoding, only into the \`String\` the input keeps.
-fn decode_segment(segment: &str) -> Result<String, AxResponse> {
+fn decode_segment(segment: &str) -> Result<String, &'static str> {
     percent_encoding::percent_decode_str(segment)
         .decode_utf8()
         .map(std::borrow::Cow::into_owned)
-        .map_err(|_| (AxStatusCode::BAD_REQUEST, "a path parameter is not valid UTF-8").into_response())
+        .map_err(|_| "a path parameter is not valid UTF-8")
 }
 
 /// A response header's value, or the answer that says the handler produced one HTTP cannot carry (a newline in the text, say): a
@@ -303,7 +311,7 @@ fn missing_segment() -> AxResponse {
     AxStatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-/// What utoipa cannot say, applied to the document it built: OpenAPI 3.2, no license, and the stream item schemas written in place
+${c.document === "none" ? "" : `/// What utoipa cannot say, applied to the document it built: OpenAPI 3.2, no license, and the stream item schemas written in place
 /// of their placeholder components.
 fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)]) {
     document["openapi"] = json!("3.2.0");
@@ -375,7 +383,7 @@ fn examples_as_list(schema: &mut serde_json::Value) {
         _ => {}
     }
 }
-`;
+`}`;
 
 const inputType = (p: Op["params"][number]) =>
   p.kind === "path" ? "String" : p.repeated && (p.kind === "query" || p.kind === "header") ? "Vec<String>" : "Option<String>";
@@ -399,6 +407,9 @@ const pathLocal = (paths: Op["params"], p: Op["params"][number]) => `path_param$
  * Reads the path once, as an iterator over borrowed segments, taking each path parameter from its place in the route: the router
  * matched this path against the route's pattern, so the segment is there. Nothing is allocated for the pass itself.
  */
+/** The status a request that cannot be read is refused with: the one the operation lists for it (400, 422, 401), else 400. */
+const refusalStatus = (o: Op) => ({ 400: "BAD_REQUEST", 401: "UNAUTHORIZED", 422: "UNPROCESSABLE_ENTITY" } as Record<number, string>)[o.inputRefusal ?? 400];
+
 const pathPass = (o: Op) => {
   const paths = o.params.filter((p) => p.kind === "path");
   if (!paths.length) return "";
@@ -406,7 +417,7 @@ const pathPass = (o: Op) => {
 ${lines(paths.map((p) => `        let mut ${pathLocal(paths, p)}: Option<String> = None;`))}
         for (index, segment) in parts.uri.path().split('/').enumerate() {
             match index {
-${lines(paths.map((p) => `                ${segmentConst(p)} => ${pathLocal(paths, p)} = Some(match decode_segment(segment) { Ok(text) => text, Err(refused) => return refused }),`))}
+${lines(paths.map((p) => `                ${segmentConst(p)} => ${pathLocal(paths, p)} = Some(match decode_segment(segment) { Ok(text) => text, Err(message) => return reject(AxStatusCode::${refusalStatus(o)}, message) }),`))}
                 _ => {}
             }
         }
@@ -480,20 +491,22 @@ ${o.answers.length > 1 ? `        match answer {\n${lines(arms)}\n        }` : a
 
 const bodyExtraction = (o: Op, config: Config) => {
   if (!o.body) return "";
-  const rejection = o.inputRefusal === undefined ? "error.into_response()"
-    : `(AxStatusCode::from_u16(${o.inputRefusal}).expect("contract status"), "the request body does not match the API contract").into_response()`;
+  const status = o.inputRefusal === undefined ? "error.status()" : `AxStatusCode::${refusalStatus(o)}`;
+  // Without `reject-with`, an operation that lists no status for it keeps axum's own answer to a body that does not decode.
+  const rejection = o.inputRefusal === undefined && !config.rejectWith ? "error.into_response()"
+    : `reject(${status}, "the request body does not match the API contract")`;
   return `
         let mut body_request = AxRequest::new(body);
         *body_request.extensions_mut() = parts.extensions.clone();
         let bytes = match AxBytes::from_request(body_request, &()).await {
             Ok(bytes) => bytes,
-            Err(error) => return error.into_response(),
+            Err(error) => return ${config.rejectWith ? 'reject(error.status(), "the request body could not be read")' : "error.into_response()"},
         };
         if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
-            return (AxStatusCode::BAD_REQUEST, "the request body nests deeper than this API accepts").into_response();
+            return reject(AxStatusCode::${refusalStatus(o)}, "the request body nests deeper than this API accepts");
         }
 ${config.requireJson ? `        if ${o.bodyOptional ? "!bytes.is_empty() && " : ""}!json_content_type(&parts.headers) {
-            return (AxStatusCode::UNSUPPORTED_MEDIA_TYPE, "the request body must be JSON").into_response();
+            return reject(AxStatusCode::UNSUPPORTED_MEDIA_TYPE, "the request body must be JSON");
         }
 ` : ""}${o.bodyOptional ? `        let body = if bytes.is_empty() {
             None
@@ -519,8 +532,8 @@ const runFn = (o: Op, config: Config) => {
   return `
     pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
         let (mut parts, body) = request.into_parts();
-        if let Err(refused) = query_within_bounds(&parts.uri) {
-            return refused;
+        if let Err(message) = query_within_bounds(&parts.uri) {
+            return reject(AxStatusCode::${refusalStatus(o)}, message);
         }${pathPass(o)}
 ${queryPass(o)}${bodyExtraction(o, config)}
         let input = Input {
@@ -584,6 +597,12 @@ pub trait ${o.trait}: Send + Sync {
     fn ${handlerName(o)}(&self) -> Option<${o.id}::Call>;
 }`;
 
+/** What the application's macro makes of each configured extension this operation states, as a const of its module. */
+export const extensionConsts = (o: Op, config: Config) => [...config.extensionExpr].flatMap(([name, x]) => {
+  const e = o.extensions.find((e) => e.name === name);
+  return e ? [`    pub const ${x.const}: ${x.type} = ${x.macro}!(${rustJson(e.json)});`] : [];
+});
+
 export const operationModule = (o: Op, config: Config) => `
 ${operationTrait(o)}
 
@@ -593,6 +612,7 @@ pub mod ${o.id} {
     use axum::response::IntoResponse as _;
 ${segmentConsts(o)}
 ${lines([...o.consts, ...o.docParams.flatMap((p) => p.consts)].map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}
+${lines(extensionConsts(o, config))}
 
     #[derive(Debug)]
     pub struct Input {
@@ -637,7 +657,7 @@ ${respondFn(o)}
             None => router,
         }
     }
-${utoipaPath(o, config)}${runFn(o, config)}
+${config.document === "none" ? "" : utoipaPath(o, config)}${runFn(o, config)}
 }`;
 
 /** The events of a stream: the union the handler's `Events` carry, and how each is sent. */
@@ -673,6 +693,10 @@ ${lines(ops.map((o) => `    let router = ${o.id}::mount(router, api);`))}
 
 export const contractModule = (c: {
   module: string;
+  /** Whether the module has a document (`ApiDoc` and `document()`). */
+  documented: boolean;
+  /** The extensions lowered to constants: their settings, and which operations state each. */
+  extensions: { expr: ExtensionExpr; has: Set<string> }[];
   ops: Op[];
   info: string[];
   paths: string[];
@@ -702,7 +726,13 @@ ${lines(c.ops.map((o) => `        pub const ${operationConst(o)}: Operation = Op
         pub const ALL: [Operation; ${c.ops.length}] = [
 ${lines(c.ops.map((o) => `            Self::${operationConst(o)},`))}
         ];
-
+${c.ops.length ? lines(c.extensions.map(({ expr, has }) => `
+        /// The \`${expr.name}\` extension of this operation, as the application's macro made it.
+        pub const fn ${expr.accessor}(&self) -> ${expr.required ? `&'static ${expr.type}` : `Option<&'static ${expr.type}>`} {
+            match self {
+${lines(c.ops.map((o) => `                Self::${o.trait}(_) => ${has.has(o.id) ? (expr.required ? `&${o.id}::${expr.const}` : `Some(&${o.id}::${expr.const})`) : "None"},`))}
+            }
+        }`)) : ""}
     }
 
     impl AsRef<super::Route> for Operation {
@@ -715,7 +745,7 @@ ${lines(c.ops.map((o) => `            Self::${operationConst(o)},`))}
 
 ${lines(c.body)}
 ${router(c.ops)}
-
+${c.documented ? `
     #[derive(utoipa::OpenApi)]
     #[openapi(
         info(${c.info.join(", ")}),
@@ -729,5 +759,5 @@ ${router(c.ops)}
         let mut document = serde_json::to_value(<ApiDoc as utoipa::OpenApi>::openapi()).expect("the document serializes");
         finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}]);
         document
-    }
+    }` : ""}
 }`;

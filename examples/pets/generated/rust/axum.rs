@@ -63,31 +63,26 @@ const MAX_QUERY_BYTES: usize = 4096;
 const MAX_QUERY_PAIRS: usize = 64;
 const MAX_JSON_DEPTH: usize = 32;
 
-fn query_within_bounds(uri: &axum::http::Uri) -> Result<(), AxResponse> {
+/// The answer to a request that cannot be read: a status and what is wrong with it.
+fn reject(status: AxStatusCode, message: &'static str) -> AxResponse {
+    (status, message).into_response()
+}
+
+fn query_within_bounds(uri: &axum::http::Uri) -> Result<(), &'static str> {
     let query = uri.query().unwrap_or("");
     if query.len() > MAX_QUERY_BYTES || query.split('&').count() > MAX_QUERY_PAIRS {
-        return Err((
-            AxStatusCode::BAD_REQUEST,
-            "the query is longer than this API accepts",
-        )
-            .into_response());
+        return Err("the query is longer than this API accepts");
     }
     Ok(())
 }
 
 /// One path segment as the text it names: percent-decoded, and refused when that is not UTF-8, as axum's `Path` refuses it. A segment
 /// with nothing to decode is not copied by the decoding, only into the `String` the input keeps.
-fn decode_segment(segment: &str) -> Result<String, AxResponse> {
+fn decode_segment(segment: &str) -> Result<String, &'static str> {
     percent_encoding::percent_decode_str(segment)
         .decode_utf8()
         .map(std::borrow::Cow::into_owned)
-        .map_err(|_| {
-            (
-                AxStatusCode::BAD_REQUEST,
-                "a path parameter is not valid UTF-8",
-            )
-                .into_response()
-        })
+        .map_err(|_| "a path parameter is not valid UTF-8")
 }
 
 /// A response header's value, or the answer that says the handler produced one HTTP cannot carry (a newline in the text, say): a
@@ -459,8 +454,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let unknown =
                 form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).count();
@@ -577,8 +572,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let mut unknown = 0_usize;
             let mut param0: Option<String> = None;
@@ -723,8 +718,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::UNPROCESSABLE_ENTITY, message);
             }
             let unknown =
                 form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).count();
@@ -735,27 +730,24 @@ pub mod petstore {
                 Err(error) => return error.into_response(),
             };
             if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
-                return (
-                    AxStatusCode::BAD_REQUEST,
+                return reject(
+                    AxStatusCode::UNPROCESSABLE_ENTITY,
                     "the request body nests deeper than this API accepts",
-                )
-                    .into_response();
+                );
             }
             if !json_content_type(&parts.headers) {
-                return (
+                return reject(
                     AxStatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "the request body must be JSON",
-                )
-                    .into_response();
+                );
             }
             let AxJson(body) = match AxJson::<crate::types::NewPet>::from_bytes(&bytes) {
                 Ok(body) => body,
                 Err(error) => {
-                    return (
-                        AxStatusCode::from_u16(422).expect("contract status"),
+                    return reject(
+                        AxStatusCode::UNPROCESSABLE_ENTITY,
                         "the request body does not match the API contract",
-                    )
-                        .into_response();
+                    );
                 }
             };
             let input = Input { unknown, body };
@@ -859,8 +851,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let mut path_param0: Option<String> = None;
             for (index, segment) in parts.uri.path().split('/').enumerate() {
@@ -868,7 +860,7 @@ pub mod petstore {
                     ID_SEGMENT => {
                         path_param0 = Some(match decode_segment(segment) {
                             Ok(text) => text,
-                            Err(refused) => return refused,
+                            Err(message) => return reject(AxStatusCode::BAD_REQUEST, message),
                         })
                     }
                     _ => {}
@@ -981,8 +973,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let mut path_param0: Option<String> = None;
             for (index, segment) in parts.uri.path().split('/').enumerate() {
@@ -990,7 +982,7 @@ pub mod petstore {
                     ID_SEGMENT => {
                         path_param0 = Some(match decode_segment(segment) {
                             Ok(text) => text,
-                            Err(refused) => return refused,
+                            Err(message) => return reject(AxStatusCode::BAD_REQUEST, message),
                         })
                     }
                     _ => {}
@@ -1109,8 +1101,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let mut path_param0: Option<String> = None;
             for (index, segment) in parts.uri.path().split('/').enumerate() {
@@ -1118,7 +1110,7 @@ pub mod petstore {
                     ID_SEGMENT => {
                         path_param0 = Some(match decode_segment(segment) {
                             Ok(text) => text,
-                            Err(refused) => return refused,
+                            Err(message) => return reject(AxStatusCode::BAD_REQUEST, message),
                         })
                     }
                     _ => {}
@@ -1232,8 +1224,8 @@ pub mod petstore {
         )]
         pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
             let (mut parts, body) = request.into_parts();
-            if let Err(refused) = query_within_bounds(&parts.uri) {
-                return refused;
+            if let Err(message) = query_within_bounds(&parts.uri) {
+                return reject(AxStatusCode::BAD_REQUEST, message);
             }
             let mut path_param0: Option<String> = None;
             for (index, segment) in parts.uri.path().split('/').enumerate() {
@@ -1241,7 +1233,7 @@ pub mod petstore {
                     ID_SEGMENT => {
                         path_param0 = Some(match decode_segment(segment) {
                             Ok(text) => text,
-                            Err(refused) => return refused,
+                            Err(message) => return reject(AxStatusCode::BAD_REQUEST, message),
                         })
                     }
                     _ => {}
@@ -1259,18 +1251,16 @@ pub mod petstore {
                 Err(error) => return error.into_response(),
             };
             if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
-                return (
+                return reject(
                     AxStatusCode::BAD_REQUEST,
                     "the request body nests deeper than this API accepts",
-                )
-                    .into_response();
+                );
             }
             if !bytes.is_empty() && !json_content_type(&parts.headers) {
-                return (
+                return reject(
                     AxStatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "the request body must be JSON",
-                )
-                    .into_response();
+                );
             }
             let body = if bytes.is_empty() {
                 None
