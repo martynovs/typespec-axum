@@ -69,7 +69,7 @@ function readOp(program: Program, config: Config, { rust, untyped, displayable }
     if (s.includes("{") && !/^\{\w+\}$/.test(s)) throw new Refusal(`${route}: only whole-segment path parameters are generated, not ${s}`);
   }
   const params = op.parameters.parameters.map((p) => {
-    if (p.type === "cookie") throw new Refusal(`${route}: cookie parameters (${p.name}) are not generated`);
+    if (p.type === "cookie" && isArray(p.param.type)) throw new Refusal(`${route}: the cookie ${p.name} is an array, which is not generated: a cookie holds one value`);
     const segment = segments.indexOf(`{${p.name}}`);
     const operator = p.type === "path" ? (p as any) : undefined;
     if (operator && (operator.style !== "simple" || operator.allowReserved || operator.explode)) {

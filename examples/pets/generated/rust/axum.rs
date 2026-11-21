@@ -96,6 +96,19 @@ fn header_value(text: &str) -> Result<AxHeaderValue, AxResponse> {
     AxHeaderValue::from_str(text).map_err(|_| AxStatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// The value of the cookie `name`: the first cookie of that name in the request's `Cookie` headers, without the quotes it may be wrapped in.
+fn cookie_value(headers: &AxHeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| {
+            let (key, value) = pair.trim().split_once('=')?;
+            (key == name).then(|| value.trim().trim_matches('"').to_owned())
+        })
+}
+
 /// Whether the request says its body is JSON (`application/json`, or any `+json` type).
 fn json_content_type(headers: &AxHeaderMap) -> bool {
     let Some(content_type) = headers
@@ -277,9 +290,10 @@ pub mod petstore {
     use super::*;
 
     /// An operation of this contract, carrying what the contract states of it (`Route`). The values are written once, on the
-    /// constants below (`Operation::LIST_PETS`, ...).
+    /// constants below (`Operation::WHOAMI`, ...).
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Operation {
+        Whoami(super::Route),
         ListPets(super::Route),
         CreatePet(super::Route),
         DeletePet(super::Route),
@@ -289,6 +303,11 @@ pub mod petstore {
     }
 
     impl Operation {
+        pub const WHOAMI: Operation = Operation::Whoami(super::Route {
+            method: AxMethod::GET,
+            path: "/me",
+            extensions: &[],
+        });
         pub const LIST_PETS: Operation = Operation::ListPets(super::Route {
             method: AxMethod::GET,
             path: "/pets",
@@ -323,7 +342,8 @@ pub mod petstore {
             extensions: &[],
         });
 
-        pub const ALL: [Operation; 6] = [
+        pub const ALL: [Operation; 7] = [
+            Self::WHOAMI,
             Self::LIST_PETS,
             Self::CREATE_PET,
             Self::DELETE_PET,
@@ -336,12 +356,122 @@ pub mod petstore {
     impl AsRef<super::Route> for Operation {
         fn as_ref(&self) -> &super::Route {
             match self {
-                Self::ListPets(route)
+                Self::Whoami(route)
+                | Self::ListPets(route)
                 | Self::CreatePet(route)
                 | Self::DeletePet(route)
                 | Self::GetPet(route)
                 | Self::PetEvents(route)
                 | Self::TouchPet(route) => route,
+            }
+        }
+    }
+
+    pub trait Whoami: Send + Sync {
+        /// The handler of this operation, or `None` when this node cannot serve it, so the router does not mount the route. The handler
+        /// takes only what it needs from the node (`whoami::call` boxes a function of the request).
+        fn whoami_handler(&self) -> Option<whoami::Call>;
+    }
+
+    pub mod whoami {
+        use super::*;
+        use axum::extract::FromRequest as _;
+        use axum::response::IntoResponse as _;
+
+        pub const SUMMARY: &'static str = r#"Read the cookies."#;
+        pub const DESCRIPTION: &'static str =
+            r#"The note is optional: a touch without one only marks the pet as seen."#;
+
+        #[derive(Debug)]
+        pub struct Input {
+            /// How many query pairs name a parameter this operation does not list.
+            pub unknown: usize,
+            pub session: Option<String>,
+            pub theme: Option<String>,
+        }
+
+        pub type Answer = crate::types::Me;
+
+        fn respond(answer: Answer) -> AxResponse {
+            let mut response = AxJson(answer).into_response();
+            *response.status_mut() = AxStatusCode::from_u16(200).expect("contract status");
+            response
+        }
+
+        pub type Call = std::sync::Arc<
+            dyn std::ops::Fn(
+                    AxParts,
+                    Input,
+                ) -> std::pin::Pin<
+                    std::boxed::Box<
+                        dyn std::future::Future<Output = Result<Answer, super::super::Refused>>
+                            + Send,
+                    >,
+                > + Send
+                + Sync,
+        >;
+
+        /// A handler made of a function of the request: boxes the function's future.
+        pub fn call<F, Fut>(handler: F) -> Call
+        where
+            F: Fn(AxParts, Input) -> Fut + Send + Sync + 'static,
+            Fut: std::future::Future<Output = Result<Answer, super::super::Refused>>
+                + Send
+                + 'static,
+        {
+            std::sync::Arc::new(move |parts, input| std::boxed::Box::pin(handler(parts, input)))
+        }
+
+        /// A handler made of a function of a state and the request, such as `State::whoami` for an `async fn whoami(self: Arc<Self>, ..)`:
+        /// each request gets a clone of the `Arc`.
+        pub fn call_with_state<T, F, Fut>(state: std::sync::Arc<T>, handler: F) -> Call
+        where
+            T: Send + Sync + 'static,
+            F: Fn(std::sync::Arc<T>, AxParts, Input) -> Fut + Send + Sync + 'static,
+            Fut: std::future::Future<Output = Result<Answer, super::super::Refused>>
+                + Send
+                + 'static,
+        {
+            std::sync::Arc::new(move |parts, input| {
+                std::boxed::Box::pin(handler(state.clone(), parts, input))
+            })
+        }
+
+        /// Mounts this operation's route on `router` when the node has a handler for it, and leaves `router` as it is when not.
+        pub fn mount<S: Whoami>(router: AxRouter, api: &S) -> AxRouter {
+            match api.whoami_handler() {
+                Some(call) => router.route(
+                    Operation::WHOAMI.as_ref().path,
+                    axum::routing::get(run).with_state(call),
+                ),
+                None => router,
+            }
+        }
+
+        #[utoipa::path(
+            get,
+            path = "/me",
+            operation_id = "whoami",
+            summary = "Read the cookies.",
+            description = "The note is optional: a touch without one only marks the pet as seen.",
+            params(("session" = Option<String>, Cookie), ("theme" = Option<String>, Cookie)),
+            responses((status = 200, description = "The request has succeeded.", body = crate::types::Me, content_type = "application/json")),
+        )]
+        pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {
+            let (mut parts, body) = request.into_parts();
+            if let Err(refused) = query_within_bounds(&parts.uri) {
+                return refused;
+            }
+            let unknown =
+                form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).count();
+            let input = Input {
+                unknown,
+                session: cookie_value(&parts.headers, "session"),
+                theme: cookie_value(&parts.headers, "theme"),
+            };
+            match call(parts, input).await {
+                Ok(answer) => respond(answer),
+                Err(refused) => refused.into_response(),
             }
         }
     }
@@ -1024,8 +1154,6 @@ pub mod petstore {
         /// Where `id` sits in `/pets/{id}/touch`: its index among the path's `/`-separated texts, the empty text before the first `/` being 0.
         const ID_SEGMENT: usize = 2;
         pub const SUMMARY: &'static str = r#"Touch a pet."#;
-        pub const DESCRIPTION: &'static str =
-            r#"The note is optional: a touch without one only marks the pet as seen."#;
 
         #[derive(Debug)]
         pub struct Input {
@@ -1098,7 +1226,6 @@ pub mod petstore {
             path = "/pets/{id}/touch",
             operation_id = "touch_pet",
             summary = "Touch a pet.",
-            description = "The note is optional: a touch without one only marks the pet as seen.",
             params(("id" = crate::types::PetId, Path)),
             request_body(content = crate::types::Note, content_type = "application/json"),
             responses((status = 200, description = "The request has succeeded.", body = crate::types::Pet, content_type = "application/json"), (status = 404, description = "The server cannot find the requested resource.", body = crate::types::Failure, content_type = "application/json")),
@@ -1226,8 +1353,9 @@ pub mod petstore {
     /// Mounts every route of this contract that `api` can serve on `router`, which the caller starts as it likes.
     pub fn mount<S>(router: AxRouter, api: &S) -> AxRouter
     where
-        S: Sized + ListPets + CreatePet + DeletePet + GetPet + PetEvents + TouchPet,
+        S: Sized + Whoami + ListPets + CreatePet + DeletePet + GetPet + PetEvents + TouchPet,
     {
+        let router = whoami::mount(router, api);
         let router = list_pets::mount(router, api);
         let router = create_pet::mount(router, api);
         let router = delete_pet::mount(router, api);
@@ -1245,6 +1373,7 @@ pub mod petstore {
             description = "A small pet store: every kind of parameter, body and answer the emitter writes."
         ),
         paths(
+            whoami::run,
             list_pets::run,
             create_pet::run,
             delete_pet::run,
@@ -1261,6 +1390,7 @@ pub mod petstore {
             crate::types::Kitten,
             crate::types::Puppy,
             crate::types::PetPatch,
+            crate::types::Me,
             crate::types::Note,
             crate::types::Failure,
             crate::types::Species,
@@ -1280,6 +1410,7 @@ pub mod petstore {
             &mut document,
             &[("PetEventItem", pet_event_item())],
             &[
+                ("whoami", &[], false, None),
                 ("list_pets", &["pets"], false, None),
                 ("create_pet", &[], false, Some(true)),
                 ("delete_pet", &["admin"], false, None),

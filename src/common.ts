@@ -166,6 +166,7 @@ export function schemaExpr(ty: string, inlined: ReadonlySet<string>): string {
   if (ty === "String") return 'json!({"type": "string"})';
   if (ty === "bool") return 'json!({"type": "boolean"})';
   if (ty === "()") return 'json!({"type": "null"})';
+  if (ty === "Decimal") return 'json!({"type": "number", "format": "decimal"})';
   if (FORMATS[ty]) return `json!({"type": "${ty.startsWith("f") ? "number" : "integer"}", "format": "${FORMATS[ty]}"})`;
   let m = ty.match(/^Vec<(.*)>$/);
   if (m) return `json!({"type": "array", "items": ${schemaExpr(m[1], inlined)}})`;

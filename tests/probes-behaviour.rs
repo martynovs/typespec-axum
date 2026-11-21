@@ -206,3 +206,59 @@ fn a_named_literal_union_and_a_literal_are_checked_as_literals() {
     assert!(serde_json::from_value::<Req>(json!({"v": {"name": "n", "kind": "zzz", "k2": "x"}})).is_err());
     assert!(serde_json::from_value::<Req>(json!({"v": {"name": "n", "kind": "a", "k2": "zzz"}})).is_err());
 }
+
+#[test]
+fn decimals_are_json_numbers_everywhere() {
+    use probes::decimals::types::Item;
+    let body = json!({"amount": 1.25, "nullable": null, "list": [1.5, 2.5], "by": {"k": 0.5}, "price": 9.75, "cheap": 2.5, "big": 100.5});
+    let item: Item = serde_json::from_value(body.clone()).expect("an item");
+    assert_eq!(serde_json::to_value(&item).expect("JSON"), body);
+    assert!(serde_json::from_value::<Item>(json!({"amount": "1.25", "nullable": null, "list": [], "by": {}, "price": 1, "big": 1})).is_err(), "a string is not a number");
+}
+
+#[test]
+fn a_decimal_is_a_number_in_the_document() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "decimals").expect("the probe");
+    assert_eq!(document["components"]["schemas"]["Decimal"], json!({"type": "number", "format": "decimal"}));
+}
+
+#[test]
+fn cookie_parameters_are_inputs() {
+    use probes::cookies::api::probe::get_c::Input;
+    let input = Input { unknown: 0, session: Some("s".to_owned()), theme: None, x_visitor: None };
+    assert_eq!(input.session.as_deref(), Some("s"));
+}
+
+#[test]
+fn types_of_one_name_in_two_namespaces_are_two_types() {
+    use probes::same_name_different_types::types::{DepotItem, Item, Out};
+    let body = json!({"shop": {"sku": "s"}, "depot": {"bin": 3, "weight": 1.5}, "both": [{"bin": 1}]});
+    let out: Out = serde_json::from_value(body.clone()).expect("a value");
+    let _: &Item = &out.shop;
+    let _: &DepotItem = &out.depot;
+    assert_eq!(serde_json::to_value(&out).expect("JSON"), body);
+    // They keep their own shapes.
+    assert!(serde_json::from_value::<Out>(json!({"shop": {"bin": 3}, "depot": {"bin": 1}, "both": []})).is_err());
+}
+
+#[test]
+fn types_of_one_name_in_two_services_are_two_types() {
+    use probes::same_name_different_services::types::{Item, OtherItem};
+    let _ = serde_json::from_value::<Item>(json!({"a": "x"})).expect("an item");
+    let _ = serde_json::from_value::<OtherItem>(json!({"b": 1})).expect("another item");
+    let documents = probes::documents();
+    let schemas = |name: &str| {
+        let (_, doc) = documents.iter().find(|(n, _)| *n == name).expect("a document");
+        doc["components"]["schemas"].as_object().expect("schemas").keys().cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(schemas("same_name_different_services"), ["Item"]);
+}
+
+#[test]
+fn a_type_named_like_a_generated_helper_is_still_its_own_type() {
+    use probes::user_type_named_like_a_helper::types::M;
+    let body = json!({"a": {"k": null, "j": {"n": "x"}}, "b": {"x": 1}});
+    let m: M = serde_json::from_value(body.clone()).expect("a value");
+    assert_eq!(serde_json::to_value(&m).expect("JSON"), body);
+}

@@ -27,7 +27,7 @@ function ident(s: string): string {
 /** Names `types.rs` uses for the standard library and serde, which a type of the contract may not take: it would shadow them. */
 const RESERVED = new Set([
   "Option", "Some", "None", "Result", "Ok", "Err", "Vec", "String", "Box", "Self", "Default", "Send", "Sync", "Clone", "Debug", "Copy",
-  "Eq", "PartialEq", "Serialize", "Deserialize", "Value", "Object",
+  "Eq", "PartialEq", "Serialize", "Deserialize", "Value", "Object", "Decimal",
 ]);
 
 type Flat = [string | symbol, Type & { kind: "UnionVariant" }][];
@@ -124,6 +124,59 @@ function acceptsArray(t: Type, seen = new Set<Type>()): boolean {
   seen.add(t);
   if (t.kind === "Union") return flattenUnion(t).some(([, v]) => acceptsArray(v.type, seen));
   return t.kind === "Model" && !!t.indexer && t.indexer.key.name === "integer";
+}
+
+/** An id for a type, to tell pairs apart while two recursive types are compared. */
+const typeIds = new WeakMap<Type, number>();
+let typeCount = 0;
+const idOf = (t: Type) => {
+  if (!typeIds.has(t)) typeIds.set(t, ++typeCount);
+  return typeIds.get(t)!;
+};
+
+/**
+ * Whether two types are one shape: what a Rust type would be made of, docs set aside. Two models of one name that have the same
+ * properties are one type; a recursive pair is taken as equal where it comes round to the pair being compared.
+ */
+function sameShape(a: Type, b: Type, program: Program, assumed = new Set<string>()): boolean {
+  if (a === b) return true;
+  if (a.kind !== b.kind) return false;
+  const pair = `${idOf(a)}:${idOf(b)}`;
+  if (assumed.has(pair)) return true;
+  assumed.add(pair);
+  const same = (x: Type | undefined, y: Type | undefined) => (x === undefined || y === undefined ? x === y : sameShape(x, y, program, assumed));
+  switch (a.kind) {
+    case "Model": {
+      const m = b as Model;
+      if (a.name !== m.name || a.properties.size !== m.properties.size) return false;
+      if (!same(a.baseModel, m.baseModel)) return false;
+      if (!!a.indexer !== !!m.indexer || (a.indexer && m.indexer && (a.indexer.key.name !== m.indexer.key.name || !same(a.indexer.value, m.indexer.value)))) return false;
+      const argsA = ((a as any).templateMapper?.args ?? []) as any[];
+      const argsB = ((m as any).templateMapper?.args ?? []) as any[];
+      if (argsA.length !== argsB.length || argsA.some((x, i) => (x.entityKind === "Type" && argsB[i].entityKind === "Type" ? !same(x, argsB[i]) : x !== argsB[i]))) return false;
+      return [...a.properties.entries()].every(([name, p]) => {
+        const other = m.properties.get(name);
+        return !!other && p.optional === other.optional && same(p.type, other.type) && JSON.stringify(constraintValues(program, p)) === JSON.stringify(constraintValues(program, other));
+      });
+    }
+    case "Enum": {
+      const e = b as Type & { kind: "Enum" };
+      return a.name === e.name && a.members.size === e.members.size && [...a.members.values()].every((m, i) => { const o = [...e.members.values()][i]; return m.name === o.name && m.value === o.value; });
+    }
+    case "Union": {
+      const u = b as Type & { kind: "Union" };
+      const va = [...a.variants.entries()], vb = [...u.variants.entries()];
+      return a.name === u.name && va.length === vb.length && va.every(([k, v], i) => k === vb[i][0] && same(v.type, vb[i][1].type));
+    }
+    case "Scalar": {
+      const c = b as Type & { kind: "Scalar" };
+      return a.name === c.name && same(a.baseScalar, c.baseScalar) && JSON.stringify(constraintValues(program, a)) === JSON.stringify(constraintValues(program, c));
+    }
+    case "String": case "Number": case "Boolean": return (a as any).value === (b as any).value;
+    case "Intrinsic": return a.name === (b as Type & { kind: "Intrinsic" }).name;
+    case "EnumMember": return a.name === (b as Type & { kind: "EnumMember" }).name && same(a.enum, (b as Type & { kind: "EnumMember" }).enum);
+    default: return false;
+  }
 }
 
 /** Whether `null` is one of the values of a union, through unions that are variants of it. */
@@ -251,7 +304,7 @@ export class Emitter {
     if (!named) return ty;
     const inner = named[1];
     const name = `Nullable${inner}`;
-    this.define(name, `nullable:${inner}`, () => {
+    this.define(name, `nullable:${inner}`, undefined, (name) => {
       this.parts.set(name, [inner]);
       return `/// A \`${inner}\` or \`null\`, the value of a map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,20 +335,39 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
     }
   }
 
+  /**
+   * `decimal` is a JSON number that may not fit a float: a newtype over `serde_json::Number`, which keeps it exactly when serde_json's
+   * `arbitrary_precision` feature is on and as a float when it is not.
+   */
+  private decimal(): string {
+    this.scalars.add("Decimal");
+    return this.alias("Decimal", () => `/// A decimal number, a JSON number. \`serde_json\` keeps its digits only with its \`arbitrary_precision\` feature.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Decimal(pub serde_json::Number);
+
+impl std::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+${manualSchema("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`);
+  }
+
   /** The Rust type at the bottom of a chain of scalars (`scalar Price extends Money; scalar Money extends float64`). */
   private rootOf(t: Type & { kind: "Scalar" }): string {
+    if (t.namespace?.name === "TypeSpec" && (t.name === "decimal" || t.name === "decimal128")) return this.decimal();
     if (SCALARS[t.name] && t.namespace?.name === "TypeSpec") return SCALARS[t.name];
     return t.baseScalar ? this.rootOf(t.baseScalar) : "String";
   }
 
   /** A scalar with a name of its own is a newtype, so the document keeps the name (`Instant`). */
   private scalar(t: Type & { kind: "Scalar" }): string {
-    if (t.namespace?.name === "TypeSpec" && (t.name === "decimal" || t.name === "decimal128")) {
-      throw new Refusal(`${t.name} is a JSON number whose Rust type the contract cannot choose: use a scalar that extends string, or float64`);
-    }
+    if (t.namespace?.name === "TypeSpec" && (t.name === "decimal" || t.name === "decimal128")) return this.decimal();
     if (SCALARS[t.name] && t.namespace?.name === "TypeSpec") return SCALARS[t.name];
     const name = ident(t.name);
-    return this.define(name, this.identity(t), () => {
+    return this.define(name, this.identity(t), t, (name) => {
       if (getEncode(this.program, t)) throw new Refusal(`${name}: @encode is not generated: the wire type would differ from the Rust type`);
       this.scalars.add(name);
       const base = t.baseScalar ? this.rust(t.baseScalar) : "String";
@@ -329,7 +401,7 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
   /** An enum is a Rust enum of its members; in `typespec` documents each member is written by hand with its title and description. */
   private enumeration(t: Type & { kind: "Enum" }): string {
     const name = ident(t.name);
-    return this.define(name, this.identity(t), () =>
+    return this.define(name, this.identity(t), t, (name) =>
       this.valueEnum(name, t, [...t.members.values()].map((m) => ({
         label: m.name,
         value: typeof m.value === "number" || typeof m.value === "string" ? m.value : m.name,
@@ -395,7 +467,7 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
     // A named union of string literals and `null` is a string enum that may be null: the enum, in an `Option`.
     if (t.name && nonNull.length > 0 && nonNull.length < variants.length && nonNull.every(([, v]) => v.type.kind === "String")) {
       const inner = `${this.nameOf(t)}Value`;
-      this.define(inner, `${this.identity(t)}#value`, () =>
+      this.define(inner, `${this.identity(t)}#value`, t, (inner) =>
         this.valueEnum(inner, t, nonNull.map(([, v]) => ({ label: (v.type as any).value, value: (v.type as any).value, target: v }))));
       return `Option<${inner}>`;
     }
@@ -414,10 +486,10 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
     const name = t.name ? this.nameOf(t) : this.numberOf(t);
     // A union of string literals is a string enum.
     if (variants.length > 0 && variants.every(([, v]) => v.type.kind === "String")) {
-      return this.define(name, this.identity(t), () =>
+      return this.define(name, this.identity(t), t, (name) =>
         this.valueEnum(name, t, variants.map(([, v]) => ({ label: (v.type as any).value, value: (v.type as any).value, target: v }))));
     }
-    return this.define(name, this.identity(t), () => {
+    return this.define(name, this.identity(t), t, (name) => {
       // Known before the variants are read: a variant may refer back to this union, and a field of it must know `null` is a value.
       if (unionIsNullable(t)) this.nullables.add(name);
       const types = variants.map(([, v]) => this.rust(v.type));
@@ -466,7 +538,7 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
     const copied = t.name ? undefined : this.copyOf(t);
     const name = t.name ? this.nameOf(t) : copied ? this.nameOf(copied) : this.numberOf(t);
     if (this.isInstance(t) || (copied && this.isInstance(copied))) this.config.inlined.add(name);
-    return this.define(name, t.name || copied ? this.identity(copied ?? t) : name, () => {
+    return this.define(name, t.name || copied ? this.identity(copied ?? t) : name, copied ?? t, (name) => {
       if (t.indexer && t.properties.size > 0 && !isNever(t.indexer.value)) {
         throw new Refusal(`${name}: a model with properties and additional properties (\`...Record<T>\`) is not generated`);
       }
@@ -669,21 +741,39 @@ ${manualSchema(name, `json!({"oneOf": [${schemaExpr(inner, this.config.inlined)}
 
   private readonly identities = new Map<string, string>();
 
+  private readonly names = new Map<string, string>();
+  private readonly types = new Map<string, Type>();
+
   /**
-   * Defines the Rust type of a type of the contract. It must be the only one to take its name, unless another of that name is written
-   * identically, and not take one `types.rs` uses: the emit fails rather than merge two different types or shadow one.
+   * Defines the Rust type of a type of the contract, and returns the name it has. Two types of one name in different namespaces are one
+   * Rust type when they have one shape (a model each service declares for itself); otherwise the later one is named with its
+   * namespace in front (`B.Item` is `BItem`). `make` writes the type for the name it is given.
    */
-  define(name: string, identity: string, make: () => string): string {
+  define(name: string, identity: string, type: Type | undefined, make: (name: string) => string): string {
+    const known = this.names.get(identity);
+    if (known !== undefined) return known;
     if (!/^[A-Z][A-Za-z0-9_]*$/.test(name)) throw new Refusal(`the type ${identity} is named ${name} in Rust: a type's name starts with a capital letter and holds only ASCII letters, digits and \`_\`: rename it in the contract`);
     if (RESERVED.has(name)) throw new Refusal(`the type ${identity} is named ${name}, which the generated code uses: rename it in the contract`);
     const prior = this.identities.get(name);
-    if (prior !== undefined && prior !== identity) {
-      // Two types of one name are one Rust type only when they are written the same (a model each service declares for itself).
-      if (this.defs.get(name) !== make()) throw new Refusal(`two types would both be ${name}: ${prior} and ${identity}, and they differ: rename one in the contract`);
-      return name;
+    let chosen = name;
+    if (prior !== undefined) {
+      const priorType = this.types.get(prior);
+      if (type && priorType && sameShape(type, priorType, this.program)) {
+        this.names.set(identity, name);
+        return name;
+      }
+      if (!type) throw new Refusal(`two types would both be ${name}: ${prior} and ${identity}: rename one in the contract`);
+      // The namespace the type is in, innermost name first (`Depot`), then the whole path (`ProbeDepot`), then a number.
+      const parts = (type as any).namespace ? getNamespaceFullName((type as any).namespace).split(".").filter((part) => part && part !== "TypeSpec") : [];
+      const taken = (candidate: string) => this.identities.has(candidate) || RESERVED.has(candidate);
+      const candidates = [pascalIdent(parts.slice(-1).join("_")) + name, pascalIdent(parts.join("_")) + name];
+      chosen = candidates.find((candidate) => candidate !== name && !taken(candidate)) ?? name;
+      for (let n = 2; taken(chosen); n++) chosen = `${name}${n}`;
     }
-    this.identities.set(name, identity);
-    return this.alias(name, make);
+    this.identities.set(chosen, identity);
+    this.names.set(identity, chosen);
+    if (type) this.types.set(identity, type);
+    return this.alias(chosen, () => make(chosen));
   }
 
   alias(name: string, make: () => string): string {

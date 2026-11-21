@@ -141,13 +141,38 @@ pub struct Pet {
     pub species: Species,
     #[serde(rename = "tags")]
     pub tags: Vec<String>,
+    /// What it cost, as a decimal number.
+    #[schema(value_type = Decimal, required = false)]
+    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Decimal>,
 }
 
 impl Pet {
     pub const DESCRIPTION: &'static str = r#"A pet in the store."#;
     pub const EXAMPLE: &'static str = r#"{"id":"p1","name":"Rex","species":"dog","tags":["good"]}"#;
     pub const AGE_DESCRIPTION: &'static str = r#"Absent while nobody knows."#;
+    pub const PRICE_DESCRIPTION: &'static str = r#"What it cost, as a decimal number."#;
 }
+
+/// A decimal number, a JSON number. `serde_json` keeps its digits only with its `arbitrary_precision` feature.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Decimal(pub serde_json::Number);
+
+impl std::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl utoipa::PartialSchema for Decimal {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        serde_json::from_value(json!({"type": "number", "format": "decimal"}))
+            .expect("the Decimal schema is valid")
+    }
+}
+
+impl utoipa::ToSchema for Decimal {}
 
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -178,11 +203,29 @@ pub struct NewPet {
     #[schema(value_type = Vec<String>, required = false)]
     #[serde(rename = "tags", default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[schema(value_type = Decimal, required = false)]
+    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Decimal>,
 }
 
 impl NewPet {
     pub const DESCRIPTION: &'static str = r#"What it takes to add a pet."#;
     pub const NAME_MIN_LENGTH: usize = 1;
+}
+
+/// What the request's cookies say.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Me {
+    #[schema(value_type = String, required = false)]
+    #[serde(rename = "session", default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[schema(value_type = String, required = false)]
+    #[serde(rename = "theme", default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+
+impl Me {
+    pub const DESCRIPTION: &'static str = r#"What the request's cookies say."#;
 }
 
 /// A note left with a pet.
@@ -220,6 +263,10 @@ pub struct Dog {
     pub species: Species,
     #[serde(rename = "tags")]
     pub tags: Vec<String>,
+    /// What it cost, as a decimal number.
+    #[schema(value_type = Decimal, required = false)]
+    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Decimal>,
     #[serde(rename = "loud")]
     pub loud: bool,
 }
@@ -228,6 +275,7 @@ impl Dog {
     pub const DESCRIPTION: &'static str =
         r#"A pet that barks: everything a `Pet` is, and how loudly."#;
     pub const AGE_DESCRIPTION: &'static str = r#"Absent while nobody knows."#;
+    pub const PRICE_DESCRIPTION: &'static str = r#"What it cost, as a decimal number."#;
 }
 
 /// A kitten, told from a puppy by its `kind`.

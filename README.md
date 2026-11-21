@@ -140,10 +140,12 @@ A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is 
 | `model` | `struct` (`#[serde(rename = ...)]`, snake_case fields, `r#` for keywords); `name?: T` is `Option<T>` that is absent, never `null`; `name?: T \| null` is `Option<Option<T>>`, `None` for absent and `Some(None)` for `null`; `extends` copies the base's fields into the struct (the document lists them flat, where `@typespec/openapi3` writes `allOf`) |
 | `enum` | string: `enum` with `rename`; numeric: `#[repr(i64)] enum` with the contract's numbers, `wire()` |
 | `union` | `#[serde(untagged)] enum`; `T \| null` is `Option<T>`; a union that is a variant of another is flattened into it (`union B { A, int32 }` has the variants of `A` and `int32`), so no enum holds an enum (a named union of string literals is a string enum of its own, and a variant of a union that also has other types, or the same literals spread into one that has only literals); a union nothing names (`string \| int32`) is one too, numbered (`Anon3`); the document inlines it for a property and refers to it as a component everywhere else. A property typed as a string literal (`kind: "cat"`, or `"a" \| "b"`, with or without `?` and `\| null`) accepts only those values, so an untagged union of models picks its variant by it; a named union of string literals and `null` is a string enum in an `Option`. Numeric and boolean literals (`kind: 1`) are not checked |
+| `decimal`, `decimal128` | `Decimal`, a newtype over `serde_json::Number` written as a JSON number (exact with serde_json's `arbitrary_precision` feature; a float without it); a component `Decimal` of the document |
 | `scalar X extends string` | `struct X(pub String)`, so the document keeps the name |
 | `T[]`, `Record<T>` | `Vec<T>`, `BTreeMap<String, T>` (a named `model X is Record<T>` is a newtype) |
 | `int8` ... `uint64`, `float32/64` | `i8` ... `u64`, `f32/f64` (`format` kept: `uint32` stays `uint32` in the document) |
 | `@minValue`, `@maxValue`, `@minLength`, `@maxLength`, `@pattern`, `@example`, `@doc`, `@summary` | in the document, and as [constants](#constants) |
+| `@cookie` | an `Option<String>` of `Input`: the first cookie of that name in the request's `Cookie` headers, without quotes (an array is refused: a cookie holds one value) |
 | `@path` / `@query` / `@header` | `Input` fields: `String`, `Option<String>`; `Vec<String>` for an array: a query with `explode: true` is one pair per value, without it one comma-separated pair; a header array is every value of the header, comma-split |
 | `@body` | `Input::body`, decoded as JSON (`Option<T>` for `body?`, absent when empty). The request must say it is JSON (`415` otherwise; see `require-json-content-type`). A body that does not decode is refused with the `400` (else `422`) the operation lists, or with axum's own rejection when it lists neither |
 | `200..=399` response | a variant of `Answer`, with a struct for the headers it sets (`Option<String>` for an optional one, sent only when there is a value; a value HTTP cannot carry is answered `500`) |
@@ -153,6 +155,12 @@ A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is 
 
 Parameters are strings on purpose: parsing `"12"` into a number, and what to do when it is not one, is the handler's, and the contract
 cannot say how a refusal looks. (`Input` is where a typed layer goes.)
+
+## Names
+
+A type has the name it has in the contract. Two different types of one name in different namespaces are two Rust types: the first keeps the name, the next
+takes its namespace's name in front (`Shop.Item` is `Item`, `Depot.Item` is `DepotItem`). Two with one shape (a model each service declares for
+itself) are one type.
 
 ## Several services
 
@@ -179,16 +187,15 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 The emit fails with a diagnostic naming the type or operation, for what it cannot do faithfully:
 
 - a response with no named shape (`untyped-responses: forbid`), and a `text/plain` body that is not a string, a number, a boolean or a scalar;
-- `decimal` (a JSON number whose Rust type the contract cannot choose), and `@cookie` parameters;
-- a path parameter that is not a whole segment (`/files/{name}.json`), or a parameter whose field collides with a generated one (`body`, `unknown`);
+- a path parameter that is not a whole segment (`/files/{name}.json`: axum's router, `matchit`, has no parameters followed by text in a segment), or a parameter whose field collides with a generated one (`body`, `unknown`);
 - a response media type other than JSON, `text/plain` or SSE, and a response without a numeric status;
 - a request body that is not JSON (`text/plain`, form, XML, multipart, `bytes`);
-- a path parameter written with an operator (`{+path}`, `{;id}`, `{id*}`), a field or parameter name with no ASCII letter or digit, two response headers that become one field;
+- a path parameter written with an operator (`{+path}`, `{;id}`, `{id*}`: only a plain `{name}` segment is read), a field or parameter name with no ASCII letter or digit, two response headers that become one field;
 - an `@events` union whose event has no named shape, or is `text/plain` but not a string, number, boolean or scalar;
 - a contract with no `@service`, and a type named `Value` or `Object`;
-- `@encode` and `@visibility`: one struct serves every operation, so the wire shape cannot differ between them;
+- `@encode` (it changes how a value is written without changing its type, which the Rust type would not follow) and `@visibility` (a model with one shape for reading and another for writing needs a struct for each, and one struct serves every operation);
 - a model with properties and `...Record<T>`;
-- two different types of one name in different namespaces (identical ones are one type), and a type named like something `types.rs` uses (`Option`, `Result`, `Vec`, `String`, `Box`, `Some`, `Ok`, ...);
+- a type named like something `types.rs` uses (`Option`, `Result`, `Vec`, `String`, `Box`, `Some`, `Ok`, ...);
 - a union that includes itself, however far down;
 - two operations of one name or on one route (`@sharedRoute`), an operation named like a crate the generated code uses (`std`, `axum`, ...) or `operation`, and one named with a single letter;
 - a numeric enum with a member that is not a whole number;

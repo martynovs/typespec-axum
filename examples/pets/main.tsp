@@ -44,6 +44,9 @@ model Pet {
   age?: uint8;
   species: Species;
   tags: string[];
+
+  /** What it cost, as a decimal number. */
+  price?: decimal;
 }
 
 /** A pet that barks: everything a `Pet` is, and how loudly. */
@@ -57,6 +60,7 @@ model NewPet {
   species: Species;
   age?: uint8;
   tags?: string[];
+  price?: decimal;
 }
 
 /** One page of pets. */
@@ -92,6 +96,12 @@ model PetPatch {
 
   /** How it feels: one of two words, and may be cleared. */
   mood?: "happy" | "sad" | null;
+}
+
+/** What the request's cookies say. */
+model Me {
+  session?: string;
+  theme?: string;
 }
 
 /** A note left with a pet. */
@@ -166,6 +176,11 @@ op create_pet(@body pet: NewPet): {
 op get_pet(@path id: PetId, @header("x-request-id") request_id?: string): Pet | NotFound;
 
 /** The note is optional: a touch without one only marks the pet as seen. */
+@route("/me")
+@get
+@summary("Read the cookies.")
+op whoami(@cookie session?: string, @cookie theme?: string): Me;
+
 #deprecated "Kept for old clients: read the pet instead."
 @route("/pets/{id}/touch")
 @post

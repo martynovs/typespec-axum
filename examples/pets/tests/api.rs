@@ -4,7 +4,8 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use pets_example::api::petstore::{
-    self, CreatePet, DeletePet, GetPet, ListPets, Operation, PetEvents, TouchPet, create_pet,
+    self, CreatePet, DeletePet, GetPet, ListPets, Operation, PetEvents, TouchPet, Whoami,
+    create_pet,
 };
 use pets_example::store::Shop;
 use serde_json::{Value, json};
@@ -250,6 +251,12 @@ impl TouchPet for Keeper {
     }
 }
 
+impl Whoami for Keeper {
+    fn whoami_handler(&self) -> Option<petstore::whoami::Call> {
+        self.0.whoami_handler()
+    }
+}
+
 impl PetEvents for Keeper {
     fn pet_events_handler(&self) -> Option<petstore::pet_events::Call> {
         self.0.pet_events_handler()
@@ -267,6 +274,60 @@ async fn operation_a_node_cannot_serve_is_not_mounted() {
         send(&app, Method::GET, "/pets/p1", None).await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn cookies_are_read_from_the_cookie_header() {
+    let app = app();
+    let ask = |cookie: &'static str| {
+        let app = app.clone();
+        async move {
+            let request = Request::get("/me")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("a request");
+            let response = app.oneshot(request).await.expect("a response");
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("a body");
+            json_of(&String::from_utf8(bytes.to_vec()).expect("text"))
+        }
+    };
+    assert_eq!(
+        ask("session=abc; theme=dark").await,
+        json!({"session": "abc", "theme": "dark"})
+    );
+    // Quotes are not part of a value; the first cookie of a name is the one; other cookies are ignored.
+    assert_eq!(
+        ask("other=1; session=\"q\"; session=second").await,
+        json!({"session": "q"})
+    );
+    assert_eq!(ask("theme=light").await, json!({"theme": "light"}));
+    let (_, _, body) = send(&app, Method::GET, "/me", None).await;
+    assert_eq!(json_of(&body), json!({}));
+}
+
+#[tokio::test]
+async fn decimal_is_a_json_number() {
+    let app = app();
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/pets",
+        Some(json!({"name": "Rex", "species": "dog", "price": 12.5})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json_of(&body)["price"], json!(12.5));
+    // A string is not a number.
+    let (status, _, _) = send(
+        &app,
+        Method::POST,
+        "/pets",
+        Some(json!({"name": "Rex", "species": "dog", "price": "12.5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -399,7 +460,7 @@ fn operation_carries_what_the_contract_states_of_it() {
         ("x-scope", "\"admin\"")
     );
     assert!(Operation::GET_PET.as_ref().extensions.is_empty());
-    assert_eq!(Operation::ALL.len(), 6);
+    assert_eq!(Operation::ALL.len(), 7);
 }
 
 #[test]
@@ -548,11 +609,13 @@ fn facts(document: &Value) -> BTreeSet<String> {
             }
         }
     }
+    // `decimal` is a component of its own here (`Decimal`), and written in place by the other emitter.
     facts.extend(
         document["components"]["schemas"]
             .as_object()
             .expect("schemas")
             .keys()
+            .filter(|name| *name != "Decimal")
             .map(|name| format!("schema {name}")),
     );
     facts

@@ -1,10 +1,10 @@
 //! The pet store's handlers: an in-memory `Store`, and `Shop`, the node that serves each operation with one of its methods.
 use crate::api::Refused;
 use crate::api::petstore::{
-    CreatePet, DeletePet, GetPet, ListPets, PetEvent, PetEvents, TouchPet, create_pet, delete_pet,
-    get_pet, list_pets, pet_events, touch_pet,
+    CreatePet, DeletePet, GetPet, ListPets, PetEvent, PetEvents, TouchPet, Whoami, create_pet,
+    delete_pet, get_pet, list_pets, pet_events, touch_pet, whoami,
 };
-use crate::types::{Failure, NewPet, Pet, PetId, PetPage};
+use crate::types::{Failure, Me, NewPet, Pet, PetId, PetPage};
 use axum::Json;
 use axum::http::{StatusCode, request::Parts};
 use axum::response::{IntoResponse, sse::Event};
@@ -82,6 +82,7 @@ impl Store {
             species,
             age,
             tags,
+            price,
         } = input.body;
         // A name is stored without the space round it; when that changed it, the answer says what it became.
         let trimmed = name.trim();
@@ -100,6 +101,7 @@ impl Store {
             age,
             species,
             tags: tags.unwrap_or_default(),
+            price,
         };
         self.pets
             .lock()
@@ -139,6 +141,17 @@ impl Store {
             pet.tags.push(format!("note:{}", note.text));
         }
         Ok(pet.clone())
+    }
+
+    pub async fn whoami(
+        self: Arc<Self>,
+        _parts: Parts,
+        input: whoami::Input,
+    ) -> Result<whoami::Answer, Refused> {
+        Ok(Me {
+            session: input.session,
+            theme: input.theme,
+        })
     }
 
     pub async fn delete_pet(
@@ -202,6 +215,12 @@ impl GetPet for Shop {
 impl TouchPet for Shop {
     fn touch_pet_handler(&self) -> Option<touch_pet::Call> {
         Some(touch_pet::call_with_state(self.0.clone(), Store::touch_pet))
+    }
+}
+
+impl Whoami for Shop {
+    fn whoami_handler(&self) -> Option<whoami::Call> {
+        Some(whoami::call_with_state(self.0.clone(), Store::whoami))
     }
 }
 

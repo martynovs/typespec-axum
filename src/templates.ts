@@ -238,6 +238,19 @@ fn header_value(text: &str) -> Result<AxHeaderValue, AxResponse> {
     AxHeaderValue::from_str(text).map_err(|_| AxStatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// The value of the cookie \`name\`: the first cookie of that name in the request's \`Cookie\` headers, without the quotes it may be wrapped in.
+fn cookie_value(headers: &AxHeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| {
+            let (key, value) = pair.trim().split_once('=')?;
+            (key == name).then(|| value.trim().trim_matches('"').to_owned())
+        })
+}
+
 /// Whether the request says its body is JSON (\`application/json\`, or any \`+json\` type).
 fn json_content_type(headers: &AxHeaderMap) -> bool {
     let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) else {
@@ -501,6 +514,7 @@ const runFn = (o: Op, config: Config) => {
   const value = (p: Op["params"][number]) =>
     p.kind === "query" ? queryLocal(queries, p)
       : p.kind === "path" ? pathLocal(paths, p)
+      : p.kind === "cookie" ? `cookie_value(&parts.headers, ${q(p.name)})`
       : headerValue(p);
   return `
     pub(crate) async fn run(AxState(call): AxState<Call>, request: AxRequest) -> AxResponse {

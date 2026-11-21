@@ -14,6 +14,45 @@
     }
   ],
   "paths": {
+    "/me": {
+      "get": {
+        "operationId": "whoami",
+        "summary": "Read the cookies.",
+        "description": "The note is optional: a touch without one only marks the pet as seen.",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "explode": false
+          },
+          {
+            "name": "theme",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "explode": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/pets": {
       "get": {
         "operationId": "list_pets",
@@ -299,7 +338,6 @@
       "post": {
         "operationId": "touch_pet",
         "summary": "Touch a pet.",
-        "description": "The note is optional: a touch without one only marks the pet as seen.",
         "parameters": [
           {
             "name": "id",
@@ -420,6 +458,18 @@
         },
         "description": "A kitten, told from a puppy by its `kind`."
       },
+      "Me": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "theme": {
+            "type": "string"
+          }
+        },
+        "description": "What the request's cookies say."
+      },
       "NewPet": {
         "type": "object",
         "required": [
@@ -443,6 +493,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "price": {
+            "type": "number",
+            "format": "decimal"
           }
         },
         "description": "What it takes to add a pet."
@@ -487,6 +541,11 @@
             "items": {
               "type": "string"
             }
+          },
+          "price": {
+            "type": "number",
+            "format": "decimal",
+            "description": "What it cost, as a decimal number."
           }
         },
         "description": "A pet in the store.",
