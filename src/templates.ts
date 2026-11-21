@@ -491,16 +491,16 @@ ${o.answers.length > 1 ? `        match answer {\n${lines(arms)}\n        }` : a
 
 const bodyExtraction = (o: Op, config: Config) => {
   if (!o.body) return "";
-  const status = o.inputRefusal === undefined ? "error.status()" : `AxStatusCode::${refusalStatus(o)}`;
-  // Without `reject-with`, an operation that lists no status for it keeps axum's own answer to a body that does not decode.
-  const rejection = o.inputRefusal === undefined && !config.rejectWith ? "error.into_response()"
-    : `reject(${status}, "the request body does not match the API contract")`;
+  // An operation that lists no status for it keeps axum's own answer to a body that does not decode, with or without `reject-with`.
+  const rejection = o.inputRefusal === undefined ? "error.into_response()"
+    : `reject(AxStatusCode::${refusalStatus(o)}, "the request body does not match the API contract")`;
   return `
         let mut body_request = AxRequest::new(body);
         *body_request.extensions_mut() = parts.extensions.clone();
         let bytes = match AxBytes::from_request(body_request, &()).await {
             Ok(bytes) => bytes,
-            Err(error) => return ${config.rejectWith ? 'reject(error.status(), "the request body could not be read")' : "error.into_response()"},
+            // A body that cannot be read (too large, say) is axum's own answer, whatever the application refuses with.
+            Err(error) => return error.into_response(),
         };
         if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
             return reject(AxStatusCode::${refusalStatus(o)}, "the request body nests deeper than this API accepts");

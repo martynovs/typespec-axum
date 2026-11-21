@@ -358,7 +358,10 @@ async fn unreadable_requests_are_refused_through_the_applications_function() {
     assert_eq!(ask("/a/x", "{").await, (StatusCode::BAD_REQUEST, "rejected 400: the request body does not match the API contract".to_owned()));
     assert_eq!(ask("/b", "{\"n\":\"x\"}").await.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(ask("/c", "{}").await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(ask("/d", "{}").await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    // None listed: axum's own answer, not the application's function.
+    let (status, text) = ask("/d", "{}").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!text.starts_with("rejected"), "{text}");
     // Too deep a body, and a path that is not UTF-8, take the same status.
     let deep = Box::leak(format!("{}1{}", "[".repeat(40), "]".repeat(40)).into_boxed_str());
     assert_eq!(ask("/c", deep).await, (StatusCode::UNAUTHORIZED, "rejected 401: the request body nests deeper than this API accepts".to_owned()));

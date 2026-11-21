@@ -727,6 +727,7 @@ pub mod petstore {
             *body_request.extensions_mut() = parts.extensions.clone();
             let bytes = match AxBytes::from_request(body_request, &()).await {
                 Ok(bytes) => bytes,
+                // A body that cannot be read (too large, say) is axum's own answer, whatever the application refuses with.
                 Err(error) => return error.into_response(),
             };
             if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
@@ -1248,6 +1249,7 @@ pub mod petstore {
             *body_request.extensions_mut() = parts.extensions.clone();
             let bytes = match AxBytes::from_request(body_request, &()).await {
                 Ok(bytes) => bytes,
+                // A body that cannot be read (too large, say) is axum's own answer, whatever the application refuses with.
                 Err(error) => return error.into_response(),
             };
             if !json_depth_within(&bytes, MAX_JSON_DEPTH) {
