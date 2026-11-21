@@ -457,3 +457,44 @@ fn generic_path_is_taken_only_for_instances_it_reads_as_the_contract_does() {
     let page: PageOfHeld = serde_json::from_value(json!({"items": [{"id": "h"}], "total": 1})).expect("page");
     assert_eq!(page.total, 1);
 }
+
+#[test]
+fn a_content_type_parameter_is_the_content_type_and_not_a_second_one() {
+    use probes::request_media::client::probe::{patch_a, post_b};
+    let body: probes::request_media::types::ItemMergePatchUpdate = serde_json::from_value(json!({})).expect("a patch");
+    let given = patch_a::request("http://x", &patch_a::Request { content_type: Some("application/merge-patch+json".to_owned()), body: body.clone() }).expect("a request");
+    assert_eq!(given.headers().get_all("content-type").iter().count(), 1);
+    // Left out, the contract's own media type is sent.
+    let left_out = patch_a::request("http://x", &patch_a::Request { content_type: None, body }).expect("a request");
+    assert_eq!(left_out.headers()["content-type"], "application/merge-patch+json");
+    let plain = post_b::request("http://x", &post_b::Request { content_type: None, body: serde_json::from_value(json!({})).expect("an item") }).expect("a request");
+    assert_eq!(plain.headers().get_all("content-type").iter().count(), 1);
+}
+
+#[test]
+fn a_cookie_a_cookie_header_cannot_carry_is_refused_and_dots_are_not_navigation() {
+    use probes::cookies::client::probe::get_c;
+    let bad = get_c::request("http://x", &get_c::Request { session: Some("a;b".to_owned()), theme: None, x_visitor: None });
+    assert!(matches!(bad, Err(probes::cookies::client::Error::Request(_))));
+    let ok = get_c::request("http://x", &get_c::Request { session: Some("abc".to_owned()), theme: None, x_visitor: None }).expect("a request");
+    assert_eq!(ok.headers()["cookie"], "session=abc");
+}
+
+#[tokio::test]
+async fn the_default_reqwest_transport_returns_a_redirect_as_the_answer() {
+    use axum::http::{StatusCode, header};
+    use axum::routing::get;
+    use probes::client_reqwest::client::Reqwest;
+    use probes::client_reqwest::client::probe::{Client, go};
+    let app = axum::Router::new()
+        .route("/go", get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/elsewhere")]) }))
+        .route("/elsewhere", get(|| async { axum::Json(json!({"v": "followed"})) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let address = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = Client::new(Reqwest::default(), format!("http://{address}"));
+    match client.go(go::Request {}).await {
+        Ok(go::Answer::Found(found)) => assert_eq!(found.location, "/elsewhere"),
+        other => panic!("{other:?}"),
+    }
+}

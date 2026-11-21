@@ -1,11 +1,15 @@
-# `../..` is the emitter in this checkout; a project that installed it writes `@martynovs/typespec-axum`.
+# `../..` is the emitter in this checkout; a project that installed it writes `@martynovs/typespec-rust-api`.
 emit:
   - "../.."
   - "@typespec/openapi3"
 output-dir: "{project-root}/generated"
 options:
-  "@martynovs/typespec-axum":
+  "@martynovs/typespec-rust-api":
     emitter-output-dir: "{output-dir}/rust"
+    client: true
+    client-reqwest: true
+    irpc: true
+    client-path: crate::client
   "@typespec/openapi3":
     emitter-output-dir: "{output-dir}/openapi"
     output-file: "openapi.json"

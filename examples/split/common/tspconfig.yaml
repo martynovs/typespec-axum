@@ -1,0 +1,8 @@
+# The shared models: types only (`server: false`, no client), no document.
+emit:
+  - "../../.."         # in your project: "@martynovs/typespec-rust-api" (or its new name)
+output-dir: "{project-root}/../generated"
+options:
+  "@martynovs/typespec-rust-api":
+    emitter-output-dir: "{output-dir}/common"
+    server: false

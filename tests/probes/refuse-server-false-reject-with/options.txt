@@ -1,0 +1,2 @@
+server=false
+reject-with=crate::hand::reject

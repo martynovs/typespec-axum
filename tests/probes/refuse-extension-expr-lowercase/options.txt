@@ -1,0 +1,4 @@
+extension-expr.x-guard.macro=crate::hand::guard
+extension-expr.x-guard.type=crate::hand::Guarding
+extension-expr.x-guard.const=call
+extension-expr.x-guard.accessor=guarding

@@ -1,23 +1,25 @@
 {
-  "name": "@martynovs/typespec-axum",
-  "version": "0.1.0",
-  "description": "A TypeSpec emitter that writes Rust: serde wire types, axum endpoints and a utoipa OpenAPI document, straight from the contract.",
+  "name": "@martynovs/typespec-rust-api",
+  "version": "0.2.0",
+  "description": "A TypeSpec emitter that writes the Rust of an API from its contract: serde wire types, an axum server, an HTTP client, an irpc protocol and the OpenAPI document.",
   "keywords": [
     "typespec",
     "emitter",
     "rust",
     "axum",
+    "irpc",
+    "client",
     "utoipa",
     "openapi"
   ],
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/martynovs/typespec-axum.git"
+    "url": "git+https://github.com/martynovs/typespec-rust-api.git"
   },
-  "homepage": "https://github.com/martynovs/typespec-axum#readme",
+  "homepage": "https://github.com/martynovs/typespec-rust-api#readme",
   "bugs": {
-    "url": "https://github.com/martynovs/typespec-axum/issues"
+    "url": "https://github.com/martynovs/typespec-rust-api/issues"
   },
   "type": "module",
   "main": "dist/src/index.js",

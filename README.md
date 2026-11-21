@@ -1,14 +1,17 @@
-# typespec-axum
+# typespec-rust-api
 
-[![CI](https://github.com/martynovs/typespec-axum/actions/workflows/ci.yml/badge.svg)](https://github.com/martynovs/typespec-axum/actions/workflows/ci.yml)
+[![CI](https://github.com/martynovs/typespec-rust-api/actions/workflows/ci.yml/badge.svg)](https://github.com/martynovs/typespec-rust-api/actions/workflows/ci.yml)
 
-A [TypeSpec](https://typespec.io) emitter that writes Rust straight from the contract: **serde wire types**, **axum endpoints** and the
-**OpenAPI document** of the same contract, built with [utoipa](https://docs.rs/utoipa). No OpenAPI file in the middle, so
-the handlers, the types and the served document cannot drift apart.
+A [TypeSpec](https://typespec.io) emitter that writes the Rust of an API straight from its contract: **serde wire types**, an **axum server**, an
+**HTTP client**, an **[irpc](https://docs.rs/irpc) protocol** and the **OpenAPI document** (built with [utoipa](https://docs.rs/utoipa)). Choose what you need
+([Choosing what is written](#choosing-what-is-written)); one contract keeps them from drifting apart. No OpenAPI file in the middle.
+(Formerly `@martynovs/typespec-axum`, which wrote the types and the axum server.)
 
 ```
-main.tsp ──tsp compile──▶ types.rs   serde + utoipa types, one per model, enum, union and scalar
-                          axum.rs    per operation: a trait, its input and answer, the handler that reads the request, the route
+main.tsp ──tsp compile──▶ types.rs    serde types, one per model, enum, union and scalar (+ utoipa schemas)
+                          axum.rs     server: per operation a trait, its input and answer, the handler that reads the request, the route
+                          client.rs   client: a Client over a transport you choose, typed answers and refusals, event streams  (client: true)
+                          irpc.rs     the contract as an irpc protocol, served from and called through the client's Api            (irpc: true)
 ```
 
 - **The contract is the router.** Each operation becomes a trait with one method that returns the handler, or `None` when the node
@@ -23,15 +26,15 @@ main.tsp ──tsp compile──▶ types.rs   serde + utoipa types, one per mod
 ## Quick start
 
 ```sh
-npm install --save-dev @martynovs/typespec-axum @typespec/compiler @typespec/http @typespec/openapi @typespec/streams @typespec/events
+npm install --save-dev @martynovs/typespec-rust-api @typespec/compiler @typespec/http @typespec/openapi @typespec/streams @typespec/events @typespec/sse
 ```
 
 ```yaml
 # tspconfig.yaml
 emit:
-  - "@martynovs/typespec-axum"
+  - "@martynovs/typespec-rust-api"
 options:
-  "@martynovs/typespec-axum":
+  "@martynovs/typespec-rust-api":
     emitter-output-dir: "{project-root}/src/generated"
 ```
 
@@ -57,6 +60,18 @@ utoipa = "6"            # not with `document: none`
 #[path = "generated/types.rs"] pub mod types;   // `types-path` says where this is (default `crate::types`)
 #[path = "generated/axum.rs"] pub mod api;
 ```
+
+## Choosing what is written
+
+| File | When | Option |
+|---|---|---|
+| `types.rs` | always: the serde wire types of the contract | `document` (the utoipa schemas; `none` for none), `type-map`, `derive-eq` |
+| `axum.rs` | the endpoints, by default | `server: false` leaves it out |
+| `client.rs` | `client: true` | `client-reqwest`, `client-max-body-bytes`, `client-path` |
+| `irpc.rs` | `irpc: true` (needs `client`) | |
+
+So `server: false` with `client: true` is a client (and with `irpc: true` an irpc client and server) with no axum in it; `server: false` alone writes the types only.
+`server: false` needs `document: none` (the document is the server's), and refuses the options of the server (`reject-with`, `refusal-type`, `extension-expr`).
 
 ## What a contract becomes
 
@@ -117,6 +132,135 @@ Also generated, per contract (namespace):
 Every `x-*` extension on an operation (`@extension("x-scope", "admin")`) is in its `Route::extensions` as `{ name, json }` and in the
 document: the contract carries it, your server decides what it means (authorization, rate limits, ...).
 
+## The client
+
+`client: true` also writes `client.rs`: a client of the same contract, with no axum in it. It sends through a `Transport` you implement
+(your HTTP client, a test double, or a router called in process); `client-reqwest: true` adds one over `reqwest` (`Reqwest`). It needs
+`http`, `bytes`, `tokio-stream`, `serde_json`, `percent-encoding` and `form_urlencoded` (and `reqwest` with its `stream` feature).
+
+```rust
+let client = client::petstore::Client::new(Reqwest::default(), "http://localhost:3000");
+let created = client.create_pet(create_pet::Request { body: new_pet }).await?;       // Answer { body, location, x_given_name }
+match client.get_pet(get_pet::Request { id, x_request_id: None }).await {
+    Err(Error::Refused(get_pet::Refusal::Status404(failure))) => { /* a refusal the contract lists, with its body */ }
+    ..
+}
+let mut events = client.pet_events(pet_events::Request { id }).await?;                // a Stream of the contract's events
+```
+
+| Per operation (`client::<service>::<operation>`) | |
+|---|---|
+| `Request` | The parameters as text (the path ones, the query ones as `Option<String>` or `Vec<String>`, headers, cookies) and the body. |
+| `Answer` | As on the server: one variant per success status, a struct where headers come with it, a stream (`<Events>Stream`) for server-sent events. |
+| `Refusal` | One variant per error status the contract lists, with its body. `Error<Refusal>` also says the transport failed, the request could not be made, the response did not match the contract (`Decode`), or the status is not listed (`Unlisted`). |
+| `request(base, &Request)`, `response(..)`, `send(&transport, base, &Request)` | The pieces: build the HTTP request (to sign or log it), read a response, or both. `Client<T>` has one method per operation that calls `send`. |
+
+Each service also has an `Api` trait with a method per operation, which `Client<T>` implements: write against it and the transport (or irpc, below) can be swapped.
+`Reqwest::default()` does not follow redirects, since a 3xx is an answer the contract may list. A stream of events is `<Events>Stream` (a `Stream` of
+`Result<Event, StreamError>`); an event name the contract does not list is an `UnknownEvent` error.
+
+What the client reads: a response body (or a line of an event stream) longer than `client-max-body-bytes` (16 MiB) is an error, not memory; events
+end their lines with `\n`, `\r` or `\r\n` as the standard says, a byte order mark first is skipped, and an event with no data is not an event.
+`Reqwest::default()` waits 10 s to connect and 60 s for bytes (a stream's keep-alives are bytes); there is no overall timeout, which a stream could not have, so wrap
+the call in one, or give `Reqwest` a `reqwest::Client` of your own. The base address is `scheme://host[/prefix]`: a query or a fragment in it is refused.
+
+What the client does with values: header and cookie values are bytes, read as UTF-8 (on the server too); a path parameter that is `.` or `..` is refused
+(`Error::Request`), since a URL reads it as navigation whatever it is encoded as; a cookie holding `;` is refused; query and path values are percent-encoded, an array that is not
+exploded is one pair with its values comma-separated. `Request`, `Refusal` and the events derive no `Clone`, since a type used only there need not have one; a `type-map` type inside a model must be `Debug`, `Clone`, `PartialEq`, `Serialize` and `Deserialize`, as the models derive them. Headers on an error
+status, a second body shape of one status, and a literal non-ASCII segment of a route (which a client percent-encodes and a router matches raw) are not covered.
+
+## irpc
+
+`irpc: true` (with `client`) also writes `irpc.rs`: each service as an [irpc](https://docs.rs/irpc) protocol, for the client and the server of it.
+One generated file has both sides; the HTTP client's `Api` trait is what they share.
+
+| | |
+|---|---|
+| `Protocol` | A call for each operation, answered with the `Answer` or how the call failed (`Failure`, a serializable `Error`). A stream is a server-streaming call: `Frame`s `Open`, then `Event`s and `Fault`s, then `End`. |
+| `Remote(irpc::Client<Protocol>)` | **The client side.** It implements `Api`, as `Client<T>` (over HTTP) does, so the call sites do not change. |
+| `handler(api)` | What a remote listener takes (`irpc::noq::listen`, iroh's). A request that does not decode (a `NaN` serializes as `null`) fails its own call and not the connection: with irpc's default handler it would close the connection and with it the other callers' calls and streams. |
+| `serve(api, messages)`, `spawn(api)` | **The server side.** They answer the calls with any `Api`: an HTTP client (a proxy), in-process handlers, a test double. `spawn` does it on a task and returns the in-process `irpc::Client`. |
+
+```rust
+// The server: implement `Api` once (or put an HTTP client behind it), serve it over QUIC.
+tokio::spawn(irpc::noq::listen::<irpc_api::petstore::Protocol>(endpoint, irpc_api::petstore::handler(Arc::new(my_pets))));   // or iroh's
+
+// The client: the same `Api` as over HTTP.
+let pets = irpc_api::petstore::Remote(irpc::Client::noq(client_endpoint, server_address));
+let created = pets.create_pet(create_pet::Request { body: new_pet }).await?;
+let mut events = pets.pet_events(pet_events::Request { id }).await?;                    // a Stream, as over HTTP
+
+// Code written against the trait does not know which it has:
+async fn adopt(api: &impl client::petstore::Api) { .. }
+```
+
+What to know:
+
+- **The wire.** The types of a contract are written for JSON (untagged unions, absent fields), which the binary format of a remote irpc call (postcard)
+  cannot carry. Requests and replies are `Wire<T>`: the value itself in process, the JSON of the contract between processes, so everything the HTTP
+  client carries crosses unchanged. A body of a failure that has one (an unlisted status, a response that did not decode) is carried as hexadecimal text.
+- **Limits.** irpc limits a message to 16 MiB: a request over it is an error of the call, a reply over it is a `Transport` error that does not say why.
+  A float crosses as JSON; give `serde_json` its `float_roundtrip` feature or its last digit may change.
+- **Streams.** The call returns once the other side has taken it, as over HTTP, not at the first event. What goes wrong in a stream keeps its kind
+  (`UnknownEvent`, `Decode`), a stream cut off before its end is an error, and dropping the stream lets the serving side go. A stream with other answers
+  or response headers is not in the protocol (the emit says so).
+- **The server is not the axum server.** `serve` takes an `Api` (a request in, an `Answer` or `Refusal` out), not the handler traits of `axum.rs`; there is no
+  bridge from one to the other, so serving the same logic over HTTP and irpc means implementing both (or `Api` over an HTTP client).
+- **Versions.** Both sides need the same contract. A call is told by its place in `Protocol`, and the places are the operations by id, so adding an operation moves the
+  ones after it; each call also carries its operation's id, which the server checks, so a client and a server of different contracts fail the call (`Request`: the
+  caller's contract is not this server's) instead of answering another operation. Regenerate and deploy both sides together.
+- **Connections.** noq allows 100 concurrent streams on a connection (its default): 100 held, unread streams make the next call wait. A server that went away is found out after the QUIC idle timeout, about 30 s.
+- **Needs** `irpc` (features `derive`, `rpc`; `noq_endpoint_setup` for localhost QUIC in tests), `tokio` (features `rt`, `macros`, `sync`), `tokio-stream`, and `serde_json`.
+  `client-path` (default `crate::client`) is where `client.rs` is. Tested over localhost QUIC (noq); iroh uses the same protocol.
+
+## Several contracts
+
+One compile writes one set of files with one set of options, for every `@service` it finds. To write a web API one way and an irpc API another, give each its
+own project directory (a `main.tsp` and a `tspconfig.yaml`), as [`examples/split`](examples/split) does:
+
+```
+contracts/
+  common/main.tsp          @service namespace Shop.Common   the models both share
+  common/tspconfig.yaml    server: false                     -> generated/common/types.rs
+  web/main.tsp             @service namespace Shop.Web       import "../common/main.tsp"
+  web/tspconfig.yaml       document: none, type-map          -> types.rs, axum.rs
+  rpc/main.tsp             @service namespace Shop.Rpc       import "../common/main.tsp"
+  rpc/tspconfig.yaml       server: false, client, irpc       -> types.rs, client.rs, irpc.rs
+```
+
+```yaml
+# rpc/tspconfig.yaml
+emit: ["@martynovs/typespec-rust-api"]
+output-dir: "{project-root}/../generated"
+options:
+  "@martynovs/typespec-rust-api":
+    emitter-output-dir: "{output-dir}/rpc"
+    server: false                       # no axum in this one
+    client: true
+    irpc: true
+    client-path: crate::rpc::client     # where the generated files sit in your crate
+    types-path: crate::rpc::types
+    type-map:                           # the models `common` wrote: named, not written again
+      Item: crate::common::types::Item
+      NewItem: crate::common::types::NewItem
+```
+
+```sh
+tsp compile contracts/common && tsp compile contracts/web && tsp compile contracts/rpc
+```
+
+```rust
+// src/lib.rs: the generated files are modules of your crate
+#[path = "../generated/common"] pub mod common { pub mod types; }
+#[path = "../generated/web"]    pub mod web    { pub mod types; #[path = "axum.rs"] pub mod api; }
+#[path = "../generated/rpc"]    pub mod rpc    { pub mod types; pub mod client; #[path = "irpc.rs"] pub mod irpc_api; }
+```
+
+Without the `common` project each contract writes its own `Item` (two types of one shape in two modules), which is fine when they share nothing. `type-map` needs
+`document: none`, and the types it names must derive `Debug`, `Clone`, `PartialEq`, `Serialize` and `Deserialize`, as the generated ones do. An `@service` with no
+operations (`common`) writes the types its namespace declares. The `rpc` service implements the client's `Api` and is served with `irpc_api::shop_rpc::spawn`; the
+`web` service implements the axum handler traits; both answer with the same `common::types::Item`.
+
 ## Constants
 
 What the contract states is also a value Rust can read. Nothing is checked for you: whether to validate, and what a refusal looks like, is
@@ -147,8 +291,8 @@ A bound has the Rust type of what it bounds (`LIMIT_MAXIMUM: u32`); a length is 
 | `int8` ... `uint64`, `float32/64` | `i8` ... `u64`, `f32/f64` (`format` kept: `uint32` stays `uint32` in the document) |
 | `@minValue`, `@maxValue`, `@minLength`, `@maxLength`, `@pattern`, `@example`, `@doc`, `@summary` | in the document, and as [constants](#constants) |
 | `@cookie` | an `Option<String>` of `Input`: the first cookie of that name in the request's `Cookie` headers, without quotes (an array is refused: a cookie holds one value) |
-| `@path` / `@query` / `@header` | `Input` fields: `String`, `Option<String>`; `Vec<String>` for an array: a query with `explode: true` is one pair per value, without it one comma-separated pair; a header array is every value of the header, comma-split |
-| `@body` | `Input::body`, decoded as JSON (`Option<T>` for `body?`, absent when empty). The request must say it is JSON (`415` otherwise; see `require-json-content-type`). A body that does not decode is refused with the `400` (else `422`) the operation lists, or with axum's own rejection when it lists neither |
+| `@path` / `@query` / `@header` | `Input` fields: `String` for a path parameter, `Option<String>` for the others, required ones included (whether one is missing is for the application to say); `Vec<String>` for an array: a query with `explode: true` is one pair per value, without it one comma-separated pair; a header array is every value of the header, comma-split |
+| `@body` | `Input::body`, decoded as JSON (`Option<T>` for `body?`, absent when empty). The request must say it is JSON (`415` otherwise; see `require-json-content-type`). A body that does not decode is refused with the first of `400`, `422`, `401` the operation lists, or with axum's own rejection when it lists none of them |
 | `200..=399` response | a variant of `Answer`, with a struct for the headers it sets (`Option<String>` for an optional one, sent only when there is a value; a value HTTP cannot carry is answered `500`) |
 | `4xx` / `5xx` response | documented, and a handler's `Err(Refused)`; never an `Answer` |
 | `SSEStream<Events>` (`@typespec/sse`) | `Events`, a stream of axum `Event`s; the `@events` union becomes an enum with `From<_> for Event` |
@@ -180,8 +324,14 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 | `derive-eq` | `false` | `true` adds `Eq` to every struct, container and union whose parts are all `Eq`: a type with a float (`float32`, `float64`) is left at `PartialEq`, and so is one made of such a type or of a type of the `type-map` whose entry does not say `eq: true` (`String` and the integers need no word). |
 | `max-query-bytes` | `4096` | A longer query string is refused (see `reject-with`: `400` unless the operation lists another) before it is parsed. |
 | `max-query-pairs` | `64` | So are more `&`-separated pairs. |
-| `max-json-depth` | `32` | A JSON body that nests deeper (`{` and `[` outside strings) is refused (see `reject-with`) before it is parsed. |
+| `max-json-depth` | `32` (at most `128`) | A JSON body that nests deeper (`{` and `[` outside strings) is refused (see `reject-with`) before it is parsed. |
 | `document` | `derived` | `derived`: the document is what utoipa's derives write. `typespec`: schemas written by hand to follow `@typespec/openapi3` more closely (enums as `oneOf` per member when `enum-strategy: annotated`, `format: uint8`, ...). `none`: no document: no `ApiDoc`, no `document()`, no `ToSchema`, no `#[utoipa::path]`, and the generated code does not use utoipa, so it is not a dependency. |
+| `server` | `true` | `false` leaves out `axum.rs`: see [Choosing what is written](#choosing-what-is-written). |
+| `client` | `false` | Also write `client.rs`: see [The client](#the-client). |
+| `irpc` | `false` | With `client`: also write `irpc.rs`, the contract as an irpc protocol: see [irpc](#irpc). |
+| `client-path` | `crate::client` | Where `client.rs` is, for `irpc.rs`. |
+| `client-max-body-bytes` | `16777216` | With `client`: the most of a response body (or of one line of an event stream) it reads; more is an error. |
+| `client-reqwest` | `false` | With `client`: a `Reqwest` transport in `client.rs`. |
 | `type-map` | none | Types the application writes itself: a map from the contract's name (`Bounds`, or `Shop::Wire::Bounds`, the namespace in front with `::` (an option's name cannot hold a dot), when more than one namespace has a type of that name: a bare name that is ambiguous is an error) to a Rust path (`crate::wire::Bounds`), or to `{ path, eq }`. The emitter writes no type for it and every reference names the path. For a model, an enum or a scalar (`Instant: String`; a mapped scalar is taken to be `Display`, and a scalar that extends it is `Eq` as its entry says, with no `Hash`); not a union, which is flattened, and not a template. Needs `document: none`: a type the emitter did not write has no schema. An optional field of a mapped type is a plain `Option` of it. A name no type of the contract has is an error. |
 | `extension-expr` | none | Extensions of an operation the application reads at compile time: an extension's name (`x-guard`) to `{ macro, type, const, accessor, required }`. Each operation that states it gets `pub const <const>: <type> = <macro>!(<its JSON>);` in its module, and `Operation` a `const fn <accessor>(&self)` returning a reference to it (`Option<&'static T>`, or `&'static T` when `required`: an operation without it fails the emit). The macro is yours: it matches the JSON as tokens (`"none"`, `{"scope": "read"}`), and a value it does not accept stops your build at that token. `Route::extensions` still carries the raw JSON. |
 | `require-json-content-type` | `true` | A JSON body is read only from a request whose `Content-Type` is `application/json` or `+json` (else `415`), as axum's `Json` does. |
@@ -232,7 +382,7 @@ gap and was checked on a 241-schema contract; these remain:
 
 ## Not (yet) covered
 
-There is no client, and no other web framework: `Parts` and the handler traits are plain `http`, only `run`
+There is no other web framework: `Parts` and the handler traits are plain `http`, only `run`
 and `mount` are axum's. Discriminated unions (`@discriminator`) are not written specially.
 
 ## Development

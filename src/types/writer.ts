@@ -1,10 +1,17 @@
 /** Reads TypeSpec types and writes the Rust type each one is: the wire types of `types.rs`. */
 import { getDoc, getEncode, getNamespaceFullName, getSummary, getExamples, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
-import { Refusal, constPrefix, constraintValues, constraints, facts, isKeyword, jsonText, q, rustField, rustJson, schemaDeps, schemaExpr, type Config } from "./common.js";
-import {
-  constantsImpl, containerNewtype, eqMarker, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion,
-  type EnumMember, type StructField,
-} from "./templates.js";
+import { type Config, Refusal } from "../config.js";
+import { constraintValues, constraints, facts } from "../constraints.js";
+import { constPrefix, isKeyword, jsonText, q, rustField, rustJson } from "../rust.js";
+import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
+import { schemaDeps, schemaExpr } from "../schema.js";
+import { pascalIdent, uniqueNames } from "../rust.js";
+
+
+
+
+
+
 
 const SCALARS: Record<string, string> = {
   string: "String", boolean: "bool", int8: "i8", int16: "i16", int32: "i32", int64: "i64", safeint: "i64",
@@ -12,12 +19,6 @@ const SCALARS: Record<string, string> = {
   integer: "i64", numeric: "f64", url: "String", bytes: "String",
   utcDateTime: "String", offsetDateTime: "String", plainDate: "String", plainTime: "String", duration: "String",
 };
-
-export function pascalIdent(s: string): string {
-  const p = s.split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join("");
-  // `Self` is the one keyword a variant name can come to, and cannot be a raw identifier.
-  return p === "Self" ? "Self_" : /^[0-9]/.test(p) ? "_" + p : p;
-}
 
 function ident(s: string): string {
   const r = s.replace(/[^A-Za-z0-9_]/g, "_");
@@ -195,6 +196,23 @@ function elementOf(t: Model): Type | undefined {
   return arg && arg.entityKind === "Type" ? (arg as Type) : undefined;
 }
 
+/** The arguments of a generic type, split at the commas that are not inside another `<..>`. */
+function topLevelCommas(args: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "<") depth++;
+    else if (args[i] === ">") depth--;
+    else if (args[i] === "," && depth === 0) {
+      out.push(args.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(args.slice(start).trim());
+  return out;
+}
+
 function ownAndInherited(t: Model): ModelProperty[] {
   // A property a model declares again (`@override`) replaces the base's, in the base's place.
   const all = new Map<string, ModelProperty>();
@@ -206,7 +224,7 @@ const isNull = (t: Type) => t.kind === "Intrinsic" && t.name === "null";
 const isNever = (t: Type) => t.kind === "Intrinsic" && t.name === "never";
 
 /** Writes the Rust type each TypeSpec type is, defining it (once) in `defs` when it has a name. */
-export class Emitter {
+export class TypeWriter {
   defs = new Map<string, string>();
   private readonly numbered = new Map<Type, string>();
   /** The Rust names of scalars of the contract, which have `Display`. */
@@ -774,9 +792,24 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
   private boxIfDirect(ty: string): string {
     const option = ty.match(/^Option<(.*)>$/);
     if (option) return `Option<${this.boxIfDirect(option[1])}>`;
-    // A generic struct holds its arguments inline, so `Envelope<Node>` inside `Node` has no size either.
-    const direct = /^[A-Z]\w*$/.test(ty) || (/^[A-Z]\w*</.test(ty) && !/^(Vec|Option|Box)</.test(ty));
-    return direct && this.reachesInProgress(ty) ? `Box<${ty}>` : ty;
+    return this.holdsInline(ty) ? `Box<${ty}>` : ty;
+  }
+
+  /**
+   * Whether a value of this Rust type has a type still being defined inside it, not behind a `Vec`, a map or a `Box`: it would have
+   * no size. A generic struct holds its arguments inline, so `Envelope<Node>` inside `Node` is one.
+   */
+  private holdsInline(ty: string, seen = new Set<string>()): boolean {
+    const option = ty.match(/^Option<(.*)>$/);
+    if (option) return this.holdsInline(option[1], seen);
+    const named = ty.match(/^([A-Z]\w*)(?:<(.*)>)?$/);
+    if (!named || named[1] === "Vec" || named[1] === "Box") return false;
+    const [, name, args] = named;
+    if (this.defs.get(name) === "") return true;
+    if (args !== undefined && topLevelCommas(args).some((arg) => this.holdsInline(arg, seen))) return true;
+    if (seen.has(name)) return false;
+    seen.add(name);
+    return (this.parts.get(name) ?? []).some((part) => this.holdsInline(part, seen));
   }
 
   /** `source` is the property whose decorators and doc state the field's facts: in a generic struct, a property of an instance (a declaration's decorators are not run). */
@@ -975,15 +1008,4 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     }
     return name;
   }
-}
-
-/** A function that returns each name once: the name, or the name with the number of its second use. */
-export function uniqueNames(): (name: string) => string {
-  const used = new Set<string>();
-  return (name) => {
-    let unique = name;
-    for (let n = 2; used.has(unique); n++) unique = `${name}${n}`;
-    used.add(unique);
-    return unique;
-  };
 }

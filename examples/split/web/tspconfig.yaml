@@ -1,0 +1,12 @@
+# The web API: types and axum endpoints, no client. The shared models are the ones `common` wrote.
+emit:
+  - "../../.."
+output-dir: "{project-root}/../generated"
+options:
+  "@martynovs/typespec-rust-api":
+    emitter-output-dir: "{output-dir}/web"
+    document: none
+    types-path: crate::web::types
+    type-map:
+      Item: crate::common::types::Item
+      NewItem: crate::common::types::NewItem
