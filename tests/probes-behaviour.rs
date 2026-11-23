@@ -597,3 +597,68 @@ fn a_type_of_another_crate_is_in_the_document_of_each_service_that_shares_it() {
     let admin = admin::document();
     assert_eq!(admin["paths"]["/own"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["type"], "array");
 }
+
+#[test]
+fn a_template_is_one_generic_struct_whatever_the_document() {
+    use probes::generic_template_with_a_document::types::{Envelope, Holder, Page, Pet};
+    // One struct for every instance, as it is with no document: the application names `Envelope<T>` once.
+    let one: Envelope<Pet> = serde_json::from_str(r#"{"status":"ok","data":{"name":"a"}}"#).expect("an envelope of a pet");
+    assert_eq!(one.data.name, "a");
+    let many: Envelope<Vec<Pet>> = serde_json::from_str(r#"{"status":"ok","data":[{"name":"a"},{"name":"b"}]}"#).expect("an envelope of pets");
+    assert_eq!(many.data.len(), 2);
+    let holder = Holder { pets: one, many: vec![many], maybe: Some(Envelope { status: "ok".to_owned(), data: Page { items: vec![], next: None }, message: None, problem: None }) };
+    assert_eq!(serde_json::to_value(&holder).expect("json")["pets"]["data"]["name"], "a");
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn an_instance_of_a_template_is_written_in_place_in_the_document() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "generic_template_with_a_document").expect("a document");
+    // The answer is the instance written out, as `@typespec/openapi3` has it: no `$ref` to a component of the instance.
+    let answer = &document["paths"]["/p"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(answer["properties"]["data"]["$ref"], "#/components/schemas/Pet", "{answer}");
+    assert_eq!(answer["required"], serde_json::json!(["status", "data"]));
+    assert_eq!(answer["description"], "What every answer is.");
+    // So is the body of a request.
+    let body = &document["paths"]["/c"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(body["properties"]["data"]["$ref"], "#/components/schemas/Page", "{body}");
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn a_type_only_a_generic_struct_names_keeps_its_schema() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "generic_template_with_a_document").expect("a document");
+    // `Problem` is first reached from a field of the generic struct, and is an ordinary type: its constraint is in its schema.
+    assert_eq!(document["components"]["schemas"]["Problem"]["properties"]["code"]["minLength"], 3, "{}", document["components"]["schemas"]["Problem"]);
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn two_instances_of_one_rust_spelling_each_keep_their_schema() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "generic_template_with_a_document").expect("a document");
+    let data = |path: &str| document["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"].clone();
+    // `Envelope<string>` and `Envelope<utcDateTime>` are both `Envelope<String>` in Rust: the second is a struct of its own, and each is served whole.
+    for path in ["/s", "/u"] {
+        let answer = &document["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(answer["required"], serde_json::json!(["status", "data"]), "{path}: {answer}");
+        assert_eq!(data(path)["type"], "string", "{path}");
+    }
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn a_template_that_holds_itself_or_is_held_by_its_own_argument_ends() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "generic_struct_edges").expect("a document");
+    let schemas = &document["components"]["schemas"];
+    // `Node { next?: Envelope<Node> }`: the instance is a component the field refers to, and its schema refers back to `Node`.
+    assert_eq!(schemas["Node"]["properties"]["next"]["$ref"], "#/components/schemas/EnvelopeOfNode", "{}", schemas["Node"]);
+    assert_eq!(schemas["EnvelopeOfNode"]["properties"]["data"]["$ref"], "#/components/schemas/Node");
+    // `Loop<T> { other?: Loop<string> }`: the answer is written in place, and `Loop<string>` refers to its own component.
+    let answer = &document["paths"]["/l"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(answer["properties"]["data"]["$ref"], "#/components/schemas/Held", "{answer}");
+    assert_eq!(schemas["LoopOfstring"]["properties"]["other"]["$ref"], "#/components/schemas/LoopOfstring", "{}", schemas["LoopOfstring"]);
+}

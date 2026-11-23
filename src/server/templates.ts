@@ -6,7 +6,7 @@ import type { Config, ExtensionExpr } from "../config.js";
 import type { Answer, Events, Op } from "../contract.js";
 import { q, rustJson } from "../rust.js";
 import { constantsImpl } from "../types/templates.js";
-import { forSchema, isInline, onlyPartial } from "../schema.js";
+import { forSchema, isInline, onlyPartial, schemaTypes } from "../schema.js";
 
 const lines = (items: string[]) => items.join("\n");
 
@@ -407,7 +407,14 @@ ${o.body ? "            body," : ""}
 };
 
 /** Envelope bodies are written out in place in the TypeSpec documents, so they are inlined here too. */
-const refOrInline = (ty: string, config: Config) => {
+const refOrInline = (ty: string, config: Config): string => {
+  // The type of a body that may be left out is its type: an `Option` or a `Box` of an instance is the instance.
+  let bare = ty;
+  for (let wrapped = bare.match(/^(?:Option|Box)<(.*)>$/); wrapped; wrapped = bare.match(/^(?:Option|Box)<(.*)>$/)) bare = wrapped[1];
+  if (bare !== ty && schemaTypes(config.inlined).has(bare)) return refOrInline(bare, config);
+  // An instance of a template is written in place, as the TypeSpec document does.
+  const instance = schemaTypes(config.inlined).get(ty);
+  if (instance?.inline) return `inline(${config.typesPath}::${instance.struct})`;
   // A type of `schema: contract` is told to utoipa by the type of the generated code that says its schema.
   const text = forSchema(ty, config.inlined, `${config.typesPath}::`);
   return text === "serde_json::Value" ? "inline(Object)"

@@ -20,11 +20,11 @@ import { snake } from "./contract.js";
  * The exact `itemSchema` of a stream, as the TypeSpec emitter writes it, and a placeholder component for utoipa to reference
  * (`finish` swaps one for the other).
  */
-function eventSchema(e: Events, { inlined }: Config) {
+function eventSchema(e: Events, { inlined, typesPath }: Config) {
   const variants = e.variants.map((v) => {
     const data = v.plain
       ? '{"contentMediaType": "text/plain", "contentSchema": {"type": "string"}}'
-      : `{"contentMediaType": "application/json", "contentSchema": ${schemaExpr(v.ty, inlined)}}`;
+      : `{"contentMediaType": "application/json", "contentSchema": ${schemaExpr(v.ty, inlined, `${typesPath}::`)}}`;
     return `{"properties": {"data": ${data}, "event": {"const": ${q(v.name)}}}}`;
   });
   const item = `json!({
@@ -34,7 +34,7 @@ function eventSchema(e: Events, { inlined }: Config) {
         "oneOf": [${variants.join(", ")}]
     })`;
   const fn = `${snake(e.name)}_item`;
-  const placeholder = manualSchema(e.name, 'json!({"type": "object"})', e.variants.flatMap((v) => schemaDeps(v.ty, inlined)), e.name + "Item");
+  const placeholder = manualSchema(e.name, 'json!({"type": "object"})', e.variants.flatMap((v) => schemaDeps(v.ty, inlined, `${typesPath}::`)), e.name + "Item");
   return { fn, code: `${eventItem(fn, item)}\n${placeholder}` };
 }
 
@@ -150,7 +150,7 @@ export function generate(program: Program, config: Config, types: Types, service
       for (const ty of mentioned) {
         for (const [, name] of withoutPaths(ty ?? "", [...config.typeMap.values()].map((e) => e.path)).matchAll(/(?:\w+::)*([A-Z]\w*)/g)) {
           if (types.known(name)) mentionedNames.add(name);
-          if (types.known(name) && !config.inlined.has(name)) schemas.add(name);
+          if (types.known(name) && !config.inlined.has(name) && !types.generic(name)) schemas.add(name);
         }
         // A type the application writes that an operation names (a parameter, say, which utoipa does not collect) is a component too.
         for (const entry of config.typeMap.values()) {

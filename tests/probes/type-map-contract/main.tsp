@@ -20,7 +20,8 @@ model Challenge extends Base {
   timeout?: int32 | null;
   extra?: Record<string>;
 }
-model Reply { id: string; challenge: Challenge }
+model Challenges is Challenge[];
+model Reply { id: string; challenge: Challenge; all: Challenges }
 model Holder { challenge: Challenge; many: Challenge[]; maybe?: Challenge; nullable: Challenge | null }
 union Either { Challenge, string }
 @route("/c") @post op begin(@body body: Challenge, @query again?: Transport): Challenge;

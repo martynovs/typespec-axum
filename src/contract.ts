@@ -97,6 +97,8 @@ export interface Types {
   closure: (roots: Iterable<string>) => Set<string>;
   /** The mapped types that are components which the given defined types hold in their fields. */
   mappedHeld: (names: Iterable<string>) => string[];
+  /** Whether a type is a generic struct, which derives no schema and so is no component. */
+  generic: (name: string) => boolean;
 }
 
 /** The tags of an operation: those of the interfaces and namespaces it sits in, outermost first, and its own. */

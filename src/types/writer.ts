@@ -4,7 +4,7 @@ import { type Config, Refusal } from "../config.js";
 import { constraintValues, constraints, facts } from "../constraints.js";
 import { constPrefix, isKeyword, jsonText, lastSegment, q, rustField, rustJson, rustStr } from "../rust.js";
 import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, peqMarker, literalSchemaFn, manualSchema, partialSchemaFn, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
-import { contractKey, contractSchemaName, forSchema, inlineKey, lacksToSchema, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "../schema.js";
+import { asReferences, contractSchemaName, forSchema, inlineKey, lacksToSchema, namesPath, onlyPartial, schemaDeps, schemaExpr, schemaTypeKey, schemaTypes, withoutPaths } from "../schema.js";
 import { pascalIdent, uniqueNames } from "../rust.js";
 
 
@@ -235,6 +235,10 @@ export class TypeWriter {
   readonly hidden = new Set<string>();
   /** The template parameters of the generic struct being written, which a field's type may be. */
   private templateParams = new Set<string>();
+  /** Whether a generic struct is being written: it derives no schema, so its fields take no `#[schema(..)]` and no function for one. */
+  private get writingGeneric(): boolean {
+    return this.templateParams.size > 0;
+  }
   /** Every template parameter name a generic struct has used: no type may take one. */
   private readonly genericNames = new Set<string>();
   /** Union types with a `null` variant: `null` is one of their values, and an `Option` of them would swallow it. */
@@ -258,6 +262,7 @@ export class TypeWriter {
       if (out.has(name)) return;
       out.add(name);
       for (const part of this.parts.get(name) ?? []) for (const inner of withoutPaths(part, [...this.config.typeMap.values()].map((e) => e.path)).match(/\b[A-Z]\w*\b/g) ?? []) visit(inner);
+      for (const held of this.hiddenHeld.get(name) ?? []) visit(held);
     };
     for (const root of roots) visit(root);
     return out;
@@ -309,7 +314,7 @@ export class TypeWriter {
     if (entry.inline) this.config.inlined.add(inlineKey(entry.path));
     // One whose schema is the contract's is told by a type of the generated code that implements what utoipa asks.
     if (entry.contract && this.documenting) {
-      this.config.inlined.add(contractKey(entry.path));
+      this.config.inlined.add(schemaTypeKey(entry.path, contractSchemaName(entry.path), lastSegment(entry.path)));
       this.contractSchema(t, entry);
     }
     // A mapped scalar is written as text where one is needed (a `text/plain` body): it is taken to be `Display`.
@@ -323,79 +328,90 @@ export class TypeWriter {
    */
   private contractSchema(t: Type & { name?: string }, entry: { path: string }): void {
     const name = contractSchemaName(entry.path);
-    this.define(name, `contract:${entry.path}`, undefined, (name) => {
-      const deps: string[] = [];
-      const inlined = this.config.inlined;
-      const extras = (target: Type) => {
-        const values: Record<string, unknown> = { ...constraintValues(this.program, target) };
-        const doc = getDoc(this.program, target);
-        if (doc) values.description = doc;
-        const examples = getExamples(this.program, target as any);
-        if (examples.length) values.example = serializeValueAsJson(this.program, examples[0].value, target as any);
-        if (isDeprecated(this.program, target)) values.deprecated = true;
-        if (target.kind === "ModelProperty" && target.defaultValue) values.default = serializeValueAsJson(this.program, target.defaultValue, target.type);
-        return values;
-      };
-      /** A schema with what the contract states of its target beside it (a doc, a limit). */
-      const stated = (schema: string, target: Type) => {
-        const values = extras(target);
-        return Object.keys(values).length
-          ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
-          : schema;
-      };
-      /** The schema of a literal type, or of a union of literals (and `null`), as the contract states it. */
-      const literalJson = (type: Type): string | undefined => {
-        if (type.kind === "String") return `json!({"type": "string", "enum": [${q(type.value)}]})`;
-        if (type.kind === "Number") return `json!({"type": ${q(Number.isInteger(type.value) ? "integer" : "number")}, "enum": [${type.value}]})`;
-        if (type.kind === "Boolean") return `json!({"type": "boolean", "enum": [${type.value}]})`;
-        if (type.kind === "Intrinsic" && type.name === "null") return `json!({"type": "null"})`;
-        if (type.kind !== "Union") return undefined;
-        const variants = [...type.variants.values()].map((v) => v.type);
-        const literals = variants.filter((v) => v.kind === "String" || v.kind === "Number");
-        const nulls = variants.filter((v) => v.kind === "Intrinsic" && v.name === "null");
-        if (literals.length === 0 || literals.length + nulls.length !== variants.length) return undefined;
-        const strings = literals.every((v) => v.kind === "String");
-        const numbers = literals.every((v) => v.kind === "Number");
-        if (!strings && !numbers) return undefined;
-        const values = literals.map((v) => (v.kind === "String" ? q(v.value) : String(v.value)));
-        const enumeration = `json!({"type": ${q(strings ? "string" : literals.every((v) => v.kind === "Number" && Number.isInteger(v.value)) ? "integer" : "number")}, "enum": [${values.join(", ")}]})`;
-        return nulls.length ? `json!({"anyOf": [${enumeration}, {"type": "null"}]})` : enumeration;
-      };
-      let schema: string;
-      if (t.kind === "Model") {
-        const lines = [`let ${t.properties.size || t.baseModel ? "mut " : ""}properties = serde_json::Map::new();`];
-        const required: string[] = [];
-        const all = ownAndInherited(t);
-        for (const p of all) {
-          const ty = this.rust(p.type);
-          deps.push(...schemaDeps(ty, inlined));
-          const literal = literalJson(p.type);
-          lines.push(`properties.insert(${q(p.name)}.to_owned(), ${stated(literal ?? schemaExpr(ty, inlined), p)});`);
-          if (!p.optional) required.push(p.name);
-        }
-        const extra: string[] = [];
-        if (required.length) extra.push(`schema["required"] = json!([${required.map(q).join(", ")}]);`);
-        if (t.indexer) {
-          const value = isNever(t.indexer.value) ? "json!(false)" : schemaExpr(this.rust(t.indexer.value), inlined);
-          if (!isNever(t.indexer.value)) deps.push(...schemaDeps(this.rust(t.indexer.value), inlined));
-          extra.push(`schema["additionalProperties"] = ${value};`);
-        }
-        schema = stated(`{ ${lines.join(" ")} let ${extra.length ? "mut " : ""}schema = json!({"type": "object", "properties": properties}); ${extra.join(" ")} schema }`, t);
-      } else if (t.kind === "Enum") {
-        const values = [...t.members.values()].map((m) => m.value ?? m.name);
-        const numeric = values.every((v) => typeof v === "number");
-        schema = stated(`json!({"type": ${q(numeric ? (values.every((v) => Number.isInteger(v)) ? "integer" : "number") : "string")}, "enum": [${values.map((v) => (typeof v === "number" ? String(v) : q(String(v)))).join(", ")}]})`, t);
-      } else if (t.kind === "Scalar") {
-        const root = this.rootOf(t);
-        deps.push(...schemaDeps(root, inlined));
-        schema = stated(schemaExpr(root, inlined), t);
-      } else {
-        throw new Refusal(`type-map: ${entry.path} is mapped with schema: contract, which takes a model, an enum or a scalar`);
-      }
+    const written = this.define(name, `contract:${entry.path}`, undefined, (name) => {
+      const { schema, deps } = this.schemaOf(t, entry.path);
       return `/// The schema of \`${entry.path}\` in the document, written from the contract: the type is the application's and has no schema of its own.
 pub struct ${name};
 ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
     });
+    if (written !== name) throw new Refusal(`type-map: ${entry.path} is mapped with schema: contract, so its schema type is ${name}, which is also a type of the contract: rename one in the contract`);
+  }
+
+  /**
+   * The schema of a model, an enum or a scalar of the contract, as a Rust expression of a `serde_json::Value`, and the types it refers to:
+   * written from the contract, for a type that has no schema of its own (`what` names it in a refusal).
+   */
+  private schemaOf(t: Type & { name?: string }, what: string): { schema: string; deps: string[] } {
+    // An instance whose schema is being written and is met again in it (a template that holds an instance of itself) is a reference to its component.
+    const inlined = this.instancesInProgress.length ? asReferences(this.config.inlined, new Set(this.instancesInProgress)) : this.config.inlined;
+    const deps: string[] = [];
+    const extras = (target: Type) => {
+      const values: Record<string, unknown> = { ...constraintValues(this.program, target) };
+      const doc = getDoc(this.program, target);
+      if (doc) values.description = doc;
+      const examples = getExamples(this.program, target as any);
+      if (examples.length) values.example = serializeValueAsJson(this.program, examples[0].value, target as any);
+      if (isDeprecated(this.program, target)) values.deprecated = true;
+      if (target.kind === "ModelProperty" && target.defaultValue) values.default = serializeValueAsJson(this.program, target.defaultValue, target.type);
+      return values;
+    };
+    /** A schema with what the contract states of its target beside it (a doc, a limit). */
+    const stated = (schema: string, target: Type) => {
+      const values = extras(target);
+      return Object.keys(values).length
+        ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
+        : schema;
+    };
+    /** The schema of a literal type, or of a union of literals (and `null`), as the contract states it. */
+    const literalJson = (type: Type): string | undefined => {
+      if (type.kind === "String") return `json!({"type": "string", "enum": [${q(type.value)}]})`;
+      if (type.kind === "Number") return `json!({"type": ${q(Number.isInteger(type.value) ? "integer" : "number")}, "enum": [${type.value}]})`;
+      if (type.kind === "Boolean") return `json!({"type": "boolean", "enum": [${type.value}]})`;
+      if (type.kind === "Intrinsic" && type.name === "null") return `json!({"type": "null"})`;
+      if (type.kind !== "Union") return undefined;
+      const variants = [...type.variants.values()].map((v) => v.type);
+      const literals = variants.filter((v) => v.kind === "String" || v.kind === "Number");
+      const nulls = variants.filter((v) => v.kind === "Intrinsic" && v.name === "null");
+      if (literals.length === 0 || literals.length + nulls.length !== variants.length) return undefined;
+      const strings = literals.every((v) => v.kind === "String");
+      const numbers = literals.every((v) => v.kind === "Number");
+      if (!strings && !numbers) return undefined;
+      const values = literals.map((v) => (v.kind === "String" ? q(v.value) : String(v.value)));
+      const enumeration = `json!({"type": ${q(strings ? "string" : literals.every((v) => v.kind === "Number" && Number.isInteger(v.value)) ? "integer" : "number")}, "enum": [${values.join(", ")}]})`;
+      return nulls.length ? `json!({"anyOf": [${enumeration}, {"type": "null"}]})` : enumeration;
+    };
+    let schema: string;
+    if (t.kind === "Model") {
+      const lines = [`let ${t.properties.size || t.baseModel ? "mut " : ""}properties = serde_json::Map::new();`];
+      const required: string[] = [];
+      const all = ownAndInherited(t);
+      for (const p of all) {
+        const ty = this.rust(p.type);
+        deps.push(...schemaDeps(ty, inlined));
+        const literal = literalJson(p.type);
+        lines.push(`properties.insert(${q(p.name)}.to_owned(), ${stated(literal ?? schemaExpr(ty, inlined), p)});`);
+        if (!p.optional) required.push(p.name);
+      }
+      const extra: string[] = [];
+      if (required.length) extra.push(`schema["required"] = json!([${required.map(q).join(", ")}]);`);
+      if (t.indexer) {
+        const value = isNever(t.indexer.value) ? "json!(false)" : schemaExpr(this.rust(t.indexer.value), inlined);
+        if (!isNever(t.indexer.value)) deps.push(...schemaDeps(this.rust(t.indexer.value), inlined));
+        extra.push(`schema["additionalProperties"] = ${value};`);
+      }
+      schema = stated(`{ ${lines.join(" ")} let ${extra.length ? "mut " : ""}schema = json!({"type": "object", "properties": properties}); ${extra.join(" ")} schema }`, t);
+    } else if (t.kind === "Enum") {
+      const values = [...t.members.values()].map((m) => m.value ?? m.name);
+      const numeric = values.every((v) => typeof v === "number");
+      schema = stated(`json!({"type": ${q(numeric ? (values.every((v) => Number.isInteger(v)) ? "integer" : "number") : "string")}, "enum": [${values.map((v) => (typeof v === "number" ? String(v) : q(String(v)))).join(", ")}]})`, t);
+    } else if (t.kind === "Scalar") {
+      const root = this.rootOf(t);
+      deps.push(...schemaDeps(root, inlined));
+      schema = stated(schemaExpr(root, inlined), t);
+    } else {
+      throw new Refusal(`type-map: ${what} is mapped with schema: contract, which takes a model, an enum or a scalar`);
+    }
+    return { schema, deps };
   }
 
   /**
@@ -442,7 +458,7 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
 
   /** `#[schema(..)]` for a property: its constraints and example. */
   schemaAttr(p: Type, extra: string[] = []): string {
-    if (!this.documenting) return "";
+    if (!this.documenting || this.writingGeneric) return "";
     const c = [...extra, ...constraints(this.program, p), ...this.exampleList(p)];
     return c.length ? `    #[schema(${c.join(", ")})]\n` : "";
   }
@@ -769,8 +785,8 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
           : `std::collections::BTreeMap<String, ${this.mapValue(t.indexer.value)}>`;
         this.parts.set(name, [inner]);
         // A derive cannot be told not to follow the type inside a newtype, so one that holds itself has its schema written by hand.
-        const recursive = this.reachesInProgress(inner) || inner.includes("serde_json::Value");
-        if (this.documenting && [...this.config.typeMap.values()].some((e) => lacksToSchema(e) && namesPath(inner, e.path))) throw new Refusal(`${name}: a list or a map of a type-map entry with inline: true or schema: contract is a newtype that derives ToSchema over it, which it has not: put it in a model, or map ${name} too`);
+        // The same for one that holds a type with no `ToSchema` for the derive (an instance of a generic struct, a type of the application's).
+        const recursive = this.reachesInProgress(inner) || inner.includes("serde_json::Value") || this.holdsToldType(inner);
         const code = containerNewtype({ doc: this.doc(t), name, inner, schema: !recursive && this.documenting }) + constantsImpl(name, facts(this.program, t, name));
         if (!recursive) return code;
         const description = getDoc(this.program, t);
@@ -793,11 +809,11 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
 
   /**
    * An instance of a template as the instance of a generic struct: `Envelope<Vec<Held>>` is `Envelope<Vec<Held>>`, one struct for
-   * every instance. Only without a document (the schema of a generic type is not written), and only for a template whose parameters
+   * every instance. With a document the struct derives no schema and each instance has a type that says its own. Only for a template whose parameters
    * are the types of its fields (`T`, `T[]`, `Record<T>`) or are not used by one; else undefined, and each instance is a struct of its own.
    */
   private generic(t: Model): string | undefined {
-    if (this.documenting || !t.node || !t.templateMapper) return undefined;
+    if (!t.node || !t.templateMapper) return undefined;
     // A literal or an alias passed as an argument may be a type or a value, which `Indeterminate` says.
     const args = t.templateMapper.args.map((a) => (a.entityKind === "Indeterminate" ? (a as any).type : a) as typeof a);
     if (!args.every((a) => a.entityKind === "Type" && ["Model", "Scalar", "Enum", "Union", "Intrinsic"].includes((a as Type).kind))) return undefined;
@@ -836,6 +852,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       params.forEach((p: string) => this.genericNames.add(p));
       const before = this.templateParams;
       this.templateParams = new Set(params);
+      this.genericStructs.add(name);
       try {
         const fields = ownAndInherited(declaration).map((p) => this.field(name, p, t.properties.get(p.name) ?? p));
         this.parts.set(name, fields.map((f) => f.ty));
@@ -849,7 +866,57 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         this.templateParams = before;
       }
     });
-    return `${written}<${typeArgs.join(", ")}>`;
+    const text = `${written}<${typeArgs.join(", ")}>`;
+    // The generic struct derives no schema: with a document, each instance has a type that says its own, under the name the instance has.
+    if (this.documenting) {
+      // Two instances that are one Rust type (`Envelope<string>` and `Envelope<utcDateTime>`) cannot have a schema each: the later is a struct of its own.
+      const component = this.nameOf(t);
+      const prior = this.instanceNames.get(text);
+      if (prior !== undefined && prior !== component) return undefined;
+      this.instanceNames.set(text, component);
+      this.instanceSchema(t, text);
+    }
+    return text;
+  }
+
+  /** The types that say the schema of the instances a type holds in a field the derive is told not to follow. */
+  private readonly hiddenHeld = new Map<string, string[]>();
+
+  /** The spellings of the instances whose schema is being written. */
+  private readonly instancesInProgress: string[] = [];
+
+  /** The component each spelling of an instance of a generic struct has. */
+  private readonly instanceNames = new Map<string, string>();
+
+  /** The generic structs written: no schema is derived for one, so no document lists it. */
+  readonly genericStructs = new Set<string>();
+
+  /**
+   * The type of the generated code that says the schema of an instance of a template written as a generic struct: the component has the name the
+   * instance has as a struct of its own (`EnvelopeOfPet`), so the document is the one it has always been.
+   */
+  private instanceSchema(t: Model, text: string): void {
+    const component = this.nameOf(t);
+    const struct = `${component}Schema`;
+    // The files that name the types by path (`axum.rs`) spell the instance with that path in front of each type of the contract.
+    const qualified = text.replace(/(?<![\w:])[A-Z]\w*/g, (n) => (this.defs.has(n) ? `${this.config.typesPath}::${n}` : n));
+    for (const spelled of new Set([text, qualified])) this.config.inlined.add(schemaTypeKey(spelled, struct, component, true));
+    const written = this.define(struct, `instance-schema:${text}`, undefined, (struct) => {
+      this.instancesInProgress.push(text, qualified);
+      let schema: string, deps: string[];
+      try {
+        ({ schema, deps } = this.schemaOf(t, text));
+      } finally {
+        this.instancesInProgress.length -= 2;
+      }
+      return `/// The schema of \`${text}\` in the document: the generic struct derives none, and the instance has the name it has as a struct of its own.\npub struct ${struct};\n${manualSchema(struct, schema, deps, component)}`;
+    });
+    if (written !== struct) throw new Refusal(`${text}: its schema type would be ${struct}, which is also a type of the contract: rename one in the contract`);
+  }
+
+  /** Whether a Rust type holds one whose schema a type of the generated code tells, or a type of the application's with no `ToSchema` for a derive. */
+  private holdsToldType(ty: string): boolean {
+    return this.documenting && ([...schemaTypes(this.config.inlined).keys()].some((p) => namesPath(ty, p)) || [...this.config.typeMap.values()].some((e) => lacksToSchema(e) && namesPath(ty, e.path)));
   }
 
   private allTypeNames?: Map<string, number>;
@@ -939,10 +1006,18 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     // A field that may be left out and may be `null` tells the two apart: `Some(None)` is `null`.
     const doubled = p.optional && (ty.startsWith("Option<") || this.nullables.has(plain));
     const optional = doubled && !ty.startsWith("Option<") ? `Option<Option<${ty}>>` : p.optional ? `Option<${ty}>` : ty;
-    if (inProgress) for (const name of plain.match(/\b[A-Z]\w*\b/g) ?? []) if (this.defs.has(name)) this.hidden.add(name);
+    if (inProgress) for (const name of plain.match(/\b[A-Z]\w*\b/g) ?? []) if (this.defs.has(name) && !this.genericStructs.has(name)) this.hidden.add(name);
+    // So is the type that says the schema of an instance such a field holds: the document lists it with the type that holds it.
+    if (inProgress) {
+      for (const [path, told] of schemaTypes(this.config.inlined)) {
+        if (!told.inline || !namesPath(plain, path)) continue;
+        this.hidden.add(told.struct);
+        this.hiddenHeld.set(owner, [...(this.hiddenHeld.get(owner) ?? []), told.struct]);
+      }
+    }
     const open = p.type.kind === "Model" && !p.type.name && p.type.properties.size === 0 && !p.type.indexer;
     // Only a `typespec` document is exact to the letter; a `derived` one leaves each field to the derive.
-    const literal = this.config.document === "typespec" ? this.literalSchema(p.type, owner, p) ?? this.formatSchema(owner, p) ?? this.nullSchema(owner, p) : undefined;
+    const literal = this.config.document === "typespec" && !this.writingGeneric ? this.literalSchema(p.type, owner, p) ?? this.formatSchema(owner, p) ?? this.nullSchema(owner, p) : undefined;
     // `Option<T>` is nullable in a schema; an optional field TypeSpec does not make `| null` is neither nullable nor required.
     const plainOptional = p.optional && !ty.startsWith("Option<") && !open && !literal;
     const allowed = this.literalStrings(p.type);
@@ -955,8 +1030,8 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     const instance = !inProgress && ((p.type.kind === "Model" && this.isInstance(p.type)) || (p.type.kind === "Union" && !p.type.name && /^Anon\d+$/.test(plain)));
     const inlineMapped = [...this.config.typeMap.values()].some((e) => onlyPartial(e) && namesPath(plain, e.path));
     // utoipa asks for `ToSchema` of what a field holds (`value_type`, the element of a `Vec`), which an inline type has not: the field takes its schema from a function.
-    if (this.documenting && inlineMapped && (constraints(this.program, p).length || this.exampleList(p).length)) throw new Refusal(`${owner}.${p.name}: a field of a type-map entry with inline: true takes no constraint or example: they have no way to reach the schema the application writes`);
-    const viaFn = this.documenting && inlineMapped ? this.partialSchemaFn(owner, p, schemaExpr(plain, this.config.inlined)) : undefined;
+    if (this.documenting && !this.writingGeneric && inlineMapped && (constraints(this.program, p).length || this.exampleList(p).length)) throw new Refusal(`${owner}.${p.name}: a field of a type-map entry with inline: true takes no constraint or example: they have no way to reach the schema the application writes`);
+    const viaFn = this.documenting && !this.writingGeneric && inlineMapped ? this.partialSchemaFn(owner, p, schemaExpr(plain, this.config.inlined)) : undefined;
     const written = [
       ...(inProgress ? ["no_recursion"] : []),
       // A mapped type the entry says is written in place (`inline`), though its path looks like a component (`uuid::Uuid`), is read from its own `PartialSchema`.
@@ -972,9 +1047,9 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     // utoipa writes a `serde_json::Value` as an empty schema, which it cannot read back: say it is an object, as everywhere else it is written.
     const objectOf = (text: string) => text.replace(/serde_json::Value/g, "Object");
     const extra = written.map((e) => (e.startsWith("value_type = ") ? forSchema(objectOf(e), this.config.inlined) : e));
-    // A type whose schema is the contract's has no `ToSchema` for the derive: the field says the type that has.
-    if (this.documenting && !extra.some((e) => e.startsWith("value_type = ")) && [...this.config.typeMap.values()].some((e) => e.contract && namesPath(plain, e.path))) extra.push(`value_type = ${forSchema(plain, this.config.inlined)}`);
-    if (!written.some((e) => e.startsWith("value_type = ")) && !literal && ty.includes("serde_json::Value")) extra.push(`value_type = ${objectOf(ty)}`);
+    if (!written.some((e) => e.startsWith("value_type = ")) && !literal && ty.includes("serde_json::Value")) extra.push(`value_type = ${forSchema(objectOf(ty), this.config.inlined)}`);
+    // A type whose schema a type of the generated code tells (the contract's, an instance of a generic struct) has no `ToSchema` for the derive: the field says the type that has.
+    if (this.documenting && !extra.some((e) => e.startsWith("value_type = ")) && [...schemaTypes(this.config.inlined).keys()].some((p) => namesPath(plain, p))) extra.push(`value_type = ${forSchema(plain, this.config.inlined)}`);
     return { doc: this.doc(source, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional, deserialize, consts: facts(this.program, source, ty, constPrefix(rustField(p.name))) };
   }
 
@@ -1126,7 +1201,16 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     this.identities.set(chosen, identity);
     this.names.set(identity, chosen);
     if (type) this.types.set(identity, type);
-    return this.alias(chosen, () => make(chosen));
+    return this.alias(chosen, () => {
+      // A type first reached from a field of a generic struct is an ordinary type: the parameters and the flag are the struct's own.
+      const before = this.templateParams;
+      if (!identity.startsWith("generic:")) this.templateParams = new Set();
+      try {
+        return make(chosen);
+      } finally {
+        this.templateParams = before;
+      }
+    });
   }
 
   alias(name: string, make: () => string): string {
