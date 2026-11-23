@@ -48,6 +48,10 @@ fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserial
 }
 `;
 
+/** A dependency of a manual schema is a type, or `Type#Name` for a type that says the schema of the component `Name` (`schema: contract`). */
+const depType = (d: string) => d.split("#")[0];
+const depName = (d: string) => (d.includes("#") ? d.split("#")[1] : lastSegment(d));
+
 /** `impl PartialSchema`/`ToSchema` for a type whose schema a derive cannot write; `schemaName` renames its component. */
 export const manualSchema = (name: string, schema: string, deps: string[], schemaName?: string) => `
 impl utoipa::PartialSchema for ${name} {
@@ -60,9 +64,9 @@ impl utoipa::ToSchema for ${name} {
 ${schemaName ? `    fn name() -> std::borrow::Cow<'static, str> { std::borrow::Cow::Borrowed(${q(schemaName)}) }` : ""}
 ${deps.length ? `    fn schemas(schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) {
 ${lines([...new Set(deps)].map((d) => d.startsWith("~") ? `        <${d.slice(1)} as utoipa::ToSchema>::schemas(schemas);` : `        // Registered before it is followed, and once: a type that refers back to this one would otherwise be followed for ever.
-        if !schemas.iter().any(|(name, _)| name == ${q(lastSegment(d))}) {
-            schemas.push((${q(lastSegment(d))}.to_owned(), <${d} as utoipa::PartialSchema>::schema()));
-            <${d} as utoipa::ToSchema>::schemas(schemas);
+        if !schemas.iter().any(|(name, _)| name == ${q(depName(d))}) {
+            schemas.push((${q(depName(d))}.to_owned(), <${depType(d)} as utoipa::PartialSchema>::schema()));
+            <${depType(d)} as utoipa::ToSchema>::schemas(schemas);
         }`))}
     }` : ""}
 }`;
@@ -76,6 +80,9 @@ export interface StructField {
 /** Where a type derives `Eq` if `derive-eq` is on and every part of it is: told apart from the other derives once all the types are known (`TypeWriter.resolveEq`). */
 export const eqMarker = (name: string) => `⟦eq:${name}⟧`;
 
+/** Where a type derives `PartialEq`: not when a part of it is a type the application writes that is not (`partial-eq: false`); told apart with `eqMarker`. */
+export const peqMarker = (name: string) => `⟦peq:${name}⟧`;
+
 /** The associated constants of a type, or nothing when it has none. */
 export const constantsImpl = (name: string, consts: Const[], generics: string[] = []) =>
   consts.length ? `\nimpl${generics.length ? `<${generics.join(", ")}>` : ""} ${name}${generics.length ? `<${generics.join(", ")}>` : ""} {\n${lines(consts.map((c) => `    pub const ${c.name}: ${c.ty} = ${c.value};`))}\n}\n` : "";
@@ -84,14 +91,14 @@ export const constantsImpl = (name: string, consts: Const[], generics: string[] 
 const structField = (f: StructField) => `${f.doc}${f.attr}    #[serde(rename = ${q(f.serde)}${f.optional ? ", default" : ""}${f.deserialize ? `, deserialize_with = ${q(f.deserialize)}` : ""}${f.optional ? ', skip_serializing_if = "Option::is_none"' : ""})]
     pub ${f.ident}: ${f.ty},`;
 
-export const structDef = (s: { doc: string; name: string; generics?: string[]; example?: string; closed: boolean; schema: boolean; fields: StructField[]; consts: Const[] }) => `${s.doc}#[derive(Debug, Clone, PartialEq${eqMarker(s.name)}, Serialize, Deserialize${s.schema ? ", utoipa::ToSchema" : ""})]
+export const structDef = (s: { doc: string; name: string; generics?: string[]; example?: string; closed: boolean; schema: boolean; fields: StructField[]; consts: Const[] }) => `${s.doc}#[derive(Debug, Clone${peqMarker(s.name)}${eqMarker(s.name)}, Serialize, Deserialize${s.schema ? ", utoipa::ToSchema" : ""})]
 ${s.closed ? "#[serde(deny_unknown_fields)]\n" : ""}${s.generics?.length ? `#[serde(bound(serialize = ${q(s.generics.map((g) => `${g}: Serialize`).join(", "))}, deserialize = ${q(s.generics.map((g) => `${g}: Deserialize<'de>`).join(", "))}))]\n` : ""}${s.schema && s.example ? `#[schema(${s.example})]\n` : ""}pub struct ${s.name}${s.generics?.length ? `<${s.generics.join(", ")}>` : ""} {
 ${lines(s.fields.map(structField))}
 }
 ${constantsImpl(s.name, [...s.consts, ...s.fields.flatMap((f) => f.consts)], s.generics)}`;
 
 /** `model X is Record<T>` or `T[]`: a newtype over the map or the list. */
-export const containerNewtype = (c: { doc: string; name: string; inner: string; schema: boolean }) => `${c.doc}#[derive(Debug, Clone, PartialEq${eqMarker(c.name)}, Serialize, Deserialize${c.schema ? ", utoipa::ToSchema" : ""})]
+export const containerNewtype = (c: { doc: string; name: string; inner: string; schema: boolean }) => `${c.doc}#[derive(Debug, Clone${peqMarker(c.name)}${eqMarker(c.name)}, Serialize, Deserialize${c.schema ? ", utoipa::ToSchema" : ""})]
 #[serde(transparent)]
 pub struct ${c.name}(pub ${c.inner});`;
 
@@ -142,7 +149,7 @@ ${lines(e.members.map((m) => `            ${m.wire} => Ok(Self::${m.variant}),`)
     }
 }`;
 
-export const untaggedUnion = (u: { doc: string; name: string; variants: { name: string; ty: string }[] }) => `${u.doc}#[derive(Debug, Clone, PartialEq${eqMarker(u.name)}, Serialize, Deserialize)]
+export const untaggedUnion = (u: { doc: string; name: string; variants: { name: string; ty: string }[] }) => `${u.doc}#[derive(Debug, Clone${peqMarker(u.name)}${eqMarker(u.name)}, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ${u.name} {
 ${lines(u.variants.map((v) => (v.ty === "()" ? `    ${v.name},` : `    ${v.name}(${v.ty}),`)))}

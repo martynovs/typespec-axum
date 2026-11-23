@@ -39,9 +39,9 @@ export interface EmitterOptions {
   "require-json-content-type"?: boolean;
   /**
    * Types the contract names that the application writes itself: the contract's name (`Name`, or `Namespace::Name` when types of that name are in
-   * more than one namespace) to the Rust path, or `{ path, eq, inline }`. The emitter writes no type for it; every reference names the path.
+   * more than one namespace) to the Rust path, or `{ path, eq, partial-eq, inline, schema }`. The emitter writes no type for it; every reference names the path.
    */
-  "type-map"?: Record<string, string | { path: string; eq?: boolean; inline?: boolean }>;
+  "type-map"?: Record<string, string | { path: string; eq?: boolean; "partial-eq"?: boolean; inline?: boolean; schema?: "contract" }>;
   /**
    * Extensions of an operation the application reads at compile time: an extension's name (`x-guard`) to the macro that makes a value
    * of its JSON (`macro!({"scope": "read"})`), the type of that value, the name of the constant each operation's module holds it
@@ -71,11 +71,11 @@ const extensionExprSchema = {
 const typeMapSchema = {
   type: "object",
   nullable: true,
-  description: "Types the application writes itself: the contract's name to a Rust path, or to { path, eq, inline }.",
+  description: "Types the application writes itself: the contract's name to a Rust path, or to { path, eq, partial-eq, inline, schema }.",
   additionalProperties: {
     anyOf: [
       { type: "string" },
-      { type: "object", properties: { path: { type: "string" }, eq: { type: "boolean", nullable: true }, inline: { type: "boolean", nullable: true } }, required: ["path"], additionalProperties: false },
+      { type: "object", properties: { path: { type: "string" }, eq: { type: "boolean", nullable: true }, "partial-eq": { type: "boolean", nullable: true }, inline: { type: "boolean", nullable: true }, schema: { type: "string", enum: ["contract", null as never], nullable: true } }, required: ["path"], additionalProperties: false },
     ],
   },
 };
@@ -144,7 +144,10 @@ function readTypeMap(raw: EmitterOptions["type-map"]): { map: Map<string, TypeMa
     const said = typeof value === "object" ? value.inline : undefined;
     if (said === false && inlineSchema(path)) return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(path)}, which names no schema of the document (a primitive, String, a std or generic type): it is written in place, so it takes no inline: false` };
     const inline = said ?? inlineSchema(path);
-    const entry = { path, eq, inline };
+    const contract = (typeof value === "object" ? value.schema : undefined) === "contract";
+    if (contract && inlineSchema(path)) return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(path)}, which names no schema of the document (a primitive, String, a std or generic type): schema: contract is for a model, an enum or a scalar of another crate` };
+    if (contract && said !== undefined) return { map, error: `type-map: ${name} says both schema: contract and inline: the schema is the contract's, or the type's own PartialSchema, not both` };
+    const entry = { path, eq, inline: contract ? false : inline, contract, partialEq: (typeof value === "object" ? value["partial-eq"] : undefined) ?? true };
     if (!RUST_PATH.test(entry.path) || /^(super|self)\b/.test(entry.path)) {
       return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(entry.path)}, which is not a Rust path from the crate (\`crate::...\`, \`std::...\` or a dependency's); \`super::\` and \`self::\` are refused, the modules sit at different depths` };
     }

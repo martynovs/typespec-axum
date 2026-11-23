@@ -6,7 +6,7 @@ import type { Config, ExtensionExpr } from "../config.js";
 import type { Answer, Events, Op } from "../contract.js";
 import { q, rustJson } from "../rust.js";
 import { constantsImpl } from "../types/templates.js";
-import { isInline, onlyPartial } from "../schema.js";
+import { forSchema, isInline, onlyPartial } from "../schema.js";
 
 const lines = (items: string[]) => items.join("\n");
 
@@ -407,12 +407,15 @@ ${o.body ? "            body," : ""}
 };
 
 /** Envelope bodies are written out in place in the TypeSpec documents, so they are inlined here too. */
-const refOrInline = (ty: string, inlined: ReadonlySet<string>) =>
-  ty === "serde_json::Value" ? "inline(Object)"
-    : isInline(ty, inlined) || /^(String|bool|[iuf]\d+|Vec<.*>)$/.test(ty) ? `inline(${ty})` : ty;
+const refOrInline = (ty: string, config: Config) => {
+  // A type of `schema: contract` is told to utoipa by the type of the generated code that says its schema.
+  const text = forSchema(ty, config.inlined, `${config.typesPath}::`);
+  return text === "serde_json::Value" ? "inline(Object)"
+    : isInline(text, config.inlined) || /^(String|bool|[iuf]\d+|Vec<.*>)$/.test(text) ? `inline(${text})` : text;
+};
 
 /** What a request body is, for utoipa: its type. Whether it may be left out is `finish`'s to say: an `Option` would also make it nullable. */
-const requestContent = (o: Op, config: Config) => refOrInline(o.body!, config.inlined);
+const requestContent = (o: Op, config: Config) => refOrInline(o.body!, config);
 
 /** The `#[utoipa::path]` of an operation: everything the TypeSpec operation states, so the document cannot drift from the route. */
 const utoipaPath = (o: Op, config: Config) => {
@@ -421,16 +424,16 @@ const utoipaPath = (o: Op, config: Config) => {
   const explicit = new Set([...config.typeMap.values()].filter(onlyPartial).map((e) => e.path));
   const params = o.docParams.map((p) => {
     const inline = p.ty !== undefined && explicit.has(p.ty);
-    const ty = inline ? `inline(${p.ty})` : p.ty;
+    const ty = inline ? `inline(${p.ty})` : forSchema(p.ty, config.inlined, `${config.typesPath}::`);
     return `(${q(p.name)} = ${ty}, ${kinds[p.kind]}${p.description ? `, description = ${q(p.description)}` : ""}${p.attrs.map((a) => `, ${a}`).join("")}${p.explode === false ? ", explode = false" : ""})`;
   });
   const responses = o.docResponses.map((r) => {
     const content = r.contents.length === 1
       ? r.contents[0].item
         ? `, content_type = ${q(r.contents[0].media)}, item_schema = ${r.contents[0].item}`
-        : `, body = ${refOrInline(r.contents[0].ty!, config.inlined)}, content_type = ${q(r.contents[0].media)}`
+        : `, body = ${refOrInline(r.contents[0].ty!, config)}, content_type = ${q(r.contents[0].media)}`
       : r.contents.length > 1
-        ? `, content(${r.contents.map((c) => (c.item ? `(String = ${q(c.media)})` : `(${refOrInline(c.ty!, config.inlined)} = ${q(c.media)})`)).join(", ")})`
+        ? `, content(${r.contents.map((c) => (c.item ? `(String = ${q(c.media)})` : `(${refOrInline(c.ty!, config)} = ${q(c.media)})`)).join(", ")})`
         : "";
     const headers = r.headers.length ? `, headers(${r.headers.map((h) => `(${q(h)} = String)`).join(", ")})` : "";
     return `(status = ${r.status}, description = ${q(r.description)}${content}${headers})`;

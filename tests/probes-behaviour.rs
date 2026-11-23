@@ -549,3 +549,36 @@ fn a_mapped_model_used_directly_and_one_with_no_named_schema_are_in_the_document
     assert_eq!(document["paths"]["/s"]["post"]["requestBody"]["content"]["application/json"]["schema"]["type"], "string");
     assert_eq!(document["paths"]["/d"]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/Limits");
 }
+
+#[cfg(not(no_document))]
+#[test]
+fn a_type_with_no_trait_of_utoipa_has_the_contracts_schema() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "type_map_contract").expect("a document");
+    let schemas = &document["components"]["schemas"];
+    // The schema is the contract's model, under the name of the application's type.
+    let challenge = &schemas["Challenge"];
+    assert_eq!(challenge["type"], "object", "{challenge}");
+    assert_eq!(challenge["description"], "The challenge the server gives.");
+    assert_eq!(challenge["required"], serde_json::json!(["id", "challenge", "kind"]), "an inherited property is in it: {challenge}");
+    assert_eq!(challenge["properties"]["rp_id"]["default"], "example.com");
+    assert_eq!(challenge["properties"]["rp_id"]["examples"], serde_json::json!(["rp.example.com"]));
+    assert_eq!(challenge["properties"]["old"]["deprecated"], true);
+    assert_eq!(challenge["properties"]["challenge"]["minLength"], 4);
+    assert_eq!(challenge["properties"]["challenge"]["description"], "The bytes, base64.");
+    assert_eq!(challenge["properties"]["kind"]["enum"], serde_json::json!(["public-key"]));
+    assert_eq!(challenge["properties"]["attachment"]["enum"], serde_json::json!(["platform", "cross-platform"]));
+    assert_eq!(challenge["properties"]["flag"]["enum"], serde_json::json!([true]));
+    assert_eq!(challenge["properties"]["transports"]["items"]["$ref"], "#/components/schemas/Transport");
+    assert_eq!(schemas["Transport"]["enum"], serde_json::json!(["usb", "nfc"]));
+    // Wherever utoipa asks a type: a body, an answer, a list, a parameter, a field, and a union.
+    let reference = serde_json::json!("#/components/schemas/Challenge");
+    assert_eq!(document["paths"]["/c"]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"], reference);
+    assert_eq!(document["paths"]["/c"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"], reference);
+    let list = &document["paths"]["/l"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(list["type"], "array");
+    assert_eq!(list["items"]["required"], serde_json::json!(["id", "challenge", "kind"]), "{list}");
+    let holder = &schemas["Holder"]["properties"];
+    assert_eq!(holder["challenge"]["$ref"], reference, "{}", schemas["Holder"]);
+    assert_eq!(holder["many"]["items"]["$ref"], reference);
+}

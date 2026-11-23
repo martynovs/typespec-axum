@@ -1,0 +1,3 @@
+type-map.Challenge.path=crate::hand::Challenge
+type-map.Challenge.schema=contract
+type-map.Challenge.partial-eq=false

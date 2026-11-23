@@ -18,14 +18,30 @@ export const inlineSchema = (path: string) => !isNamed(path) || path === "String
 /** The mark in `inlined` of a mapped path whose schema is written in place. */
 export const inlineKey = (path: string) => `=${path}`;
 
+/** The mark in `inlined` of a mapped path whose schema is the contract's: the document is written by a type of the generated code, not by the type. */
+export const contractKey = (path: string) => `@${path}`;
+
+/** The type of the generated code that says the schema of a mapped type of `schema: contract`. */
+export const contractSchemaName = (path: string) => `${lastSegment(path)}Schema`;
+
+/** The text with a whole path replaced (`crate::wire::Limits` is not the start of `crate::wire::LimitsList`). */
+export const replacePath = (text: string, path: string, to: string) => text.replace(new RegExp(`(?<![\\w:])${path.replace(/[$()*+.?[\\\\\]^{|}]/g, "\\$&")}(?!\\w)`, "g"), () => to);
+
+/** The text without the given paths: a mapped path `crate::wire::Limits` is not a mention of a type of the contract named `Limits`. */
+export const withoutPaths = (text: string, paths: Iterable<string>) => { let out = text; for (const path of paths) out = replacePath(out, path, ""); return out; };
+
+/** The text with each type of `schema: contract` replaced by the type that says its schema, `prefix` in front of it. */
+export const forSchema = (text: string, inlined: ReadonlySet<string>, prefix = "") => { let out = text; for (const key of inlined) if (key.startsWith("@")) out = replacePath(out, key.slice(1), prefix + contractSchemaName(key.slice(1))); return out; };
+
 /** A type the derive of `utoipa` already reads without `ToSchema`: a string, a primitive, a list, a map, an `Option`, a `Box`. */
 const nativeToDerive = (path: string) => /^(?:::)?(?:std::string::)?String$|^(?:bool|char|[iuf](?:8|16|32|64|128|size))$|^serde_json::Value$|^(?:Vec|Option|Box)<|^(?:std|alloc)::(?:collections|vec|boxed|option)::/.test(path);
 
 /** Whether an entry of the `type-map` is read from its own `PartialSchema` where utoipa would ask `ToSchema`: `inline`, and not a type the derive reads itself. */
 export const onlyPartial = (entry: { path: string; inline: boolean }) => entry.inline && !nativeToDerive(entry.path);
 
-/** The text without the given paths: a mapped path `crate::wire::Limits` is not a mention of a type of the contract named `Limits`. */
-export const withoutPaths = (text: string, paths: Iterable<string>) => { let out = text; for (const path of paths) out = out.replace(new RegExp(`(?<![\\w:])${path.replace(/[$()*+.?[\\\\\]^{|}]/g, "\\$&")}(?!\\w)`, "g"), ""); return out; };
+/** An entry whose type has no `ToSchema` of its own, so a type that derives one over it cannot: read from its `PartialSchema` (`inline`) or written from the contract. */
+export const lacksToSchema = (entry: { path: string; inline: boolean; contract: boolean }) => onlyPartial(entry) || entry.contract;
+
 
 /** Whether a Rust type names `path`, as a whole path and not as the start of a longer one. */
 export const namesPath = (ty: string, path: string) => new RegExp(`(?<![\\w:])${path.replace(/[$()*+.?[\\\]^{|}]/g, "\\$&")}(?!\\w)`).test(ty);
@@ -64,6 +80,7 @@ export function schemaExpr(ty: string, inlined: ReadonlySet<string>): string {
 export function schemaDeps(ty: string, inlined: ReadonlySet<string>): string[] {
   const m = ty.match(/^(?:Vec|Option)<(.*)>$/) ?? ty.match(/^std::collections::BTreeMap<String, (.*)>$/);
   if (m) return schemaDeps(m[1], inlined);
+  if (inlined.has(contractKey(ty))) return [`${contractSchemaName(ty)}#${lastSegment(ty)}`];
   if (!isNamed(ty) || ty === "String" || inlined.has(inlineKey(ty))) return [];
   return inlined.has(lastSegment(ty)) ? [`~${ty}`] : [ty];
 }

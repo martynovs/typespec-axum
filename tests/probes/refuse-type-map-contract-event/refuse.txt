@@ -1,0 +1,1 @@
+the schema of an event is not written from the contract

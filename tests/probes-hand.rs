@@ -134,3 +134,25 @@ impl utoipa::PartialSchema for Opaque {
         utoipa::openapi::ObjectBuilder::new().schema_type(utoipa::openapi::schema::Type::String).description(Some("opaque")).into()
     }
 }
+
+/// A type of another crate, as the application sees it: no `PartialEq`, no `ToSchema`, no `PartialSchema`. The document is the contract's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Challenge {
+    pub challenge: String,
+    pub id: String,
+    pub rp_id: Option<String>,
+    pub old: Option<String>,
+    pub transports: Option<Vec<Transport>>,
+    pub kind: String,
+    pub attachment: Option<String>,
+    pub flag: Option<bool>,
+    pub timeout: Option<Option<i32>>,
+    pub extra: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    Usb,
+    Nfc,
+}

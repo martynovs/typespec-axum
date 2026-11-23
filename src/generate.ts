@@ -4,7 +4,7 @@ import { isMetadata, type HttpService } from "@typespec/http";
 import { resolveInfo } from "@typespec/openapi";
 import { type Events, type Op, type Types, readOp } from "./contract.js";
 import { type Config, Refusal } from "./config.js";
-import { namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
+import { contractSchemaName, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
 import { generatedNotice, isKeyword, q } from "./rust.js";
 import { manualSchema } from "./types/templates.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, operationModule } from "./server/templates.js";
@@ -135,6 +135,11 @@ export function generate(program: Program, config: Config, types: Types, service
           if (onlyPartial(entry) && p.ty !== undefined && p.ty !== entry.path && namesPath(p.ty, entry.path)) throw new Refusal(`${module}: ${o.id} has the parameter ${p.name} of ${p.ty}, which holds ${entry.path}, a type-map entry with inline: true: utoipa takes whether a parameter is optional, and the element of a list, from ToSchema, so only a required parameter of the type itself is written`);
         }
       }
+      for (const variant of config.document === "none" ? [] : o.events?.variants ?? []) {
+        for (const entry of config.typeMap.values()) {
+          if (entry.contract && namesPath(variant.ty, entry.path)) throw new Refusal(`${module}: the event ${variant.name} of ${o.id} holds ${entry.path}, a type-map entry with schema: contract: the schema of an event is not written from the contract, so put it in a model`);
+        }
+      }
       // utoipa asks for `ToSchema` of a body or an answer (a list's element too), which a type of `inline: true` has not: it is for fields and parameters.
       for (const ty of config.document === "none" ? [] : [o.body, ...o.answers.map((a) => a.ty), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.ty)), ...(o.events?.variants.map((v) => v.ty) ?? [])]) {
         for (const entry of config.typeMap.values()) {
@@ -189,7 +194,7 @@ export function generate(program: Program, config: Config, types: Types, service
     const listed = new Set<string>();
     const components = mapped.filter((path) => !listed.has(path.replace(/^::/, "")) && listed.add(path.replace(/^::/, "")));
     if (config.document !== "none") {
-      const held = new Set([...[...reached, ...schemas].filter((name) => types.known(name)), ...unions.keys(), ...[...unions.keys()].map((name) => `${name}Item`), ...[...config.inlined].filter((name) => !name.startsWith("="))]);
+      const held = new Set([...[...reached, ...schemas].filter((name) => types.known(name)), ...unions.keys(), ...[...unions.keys()].map((name) => `${name}Item`), ...[...config.inlined].filter((name) => !name.startsWith("=") && !name.startsWith("@"))]);
       const owners = new Map<string, string>();
       for (const path of components) {
         const ident = path.slice(path.lastIndexOf(":") + 1);
@@ -237,7 +242,7 @@ export function generate(program: Program, config: Config, types: Types, service
       info,
       paths: [...ops.map((o) => `${o.id}::run`), ...shared],
       // Every type the namespace declares is a schema, reachable or not (`omit-unreachable-types: false`), and so is each event item.
-      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components, ...unions.keys()],
+      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components.map((path) => ([...config.typeMap.values()].some((e) => e.path === path && e.contract) ? `${config.typesPath}::${contractSchemaName(path)}` : path)), ...unions.keys()],
       items: [...schemaOf].map(([name, s]) => `(${q(name + "Item")}, ${s.fn}())`),
       operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [

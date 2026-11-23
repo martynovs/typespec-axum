@@ -56,7 +56,7 @@ export interface ExtensionExpr {
 }
 
 /** A type written by hand: where it is, whether it is `Eq` (which the emitter cannot see), and `inline`: the path names no schema of the document, so its schema is written in place from its own `PartialSchema`; otherwise it is a component and implements `ToSchema`. */
-export interface TypeMapEntry { path: string; eq: boolean; inline: boolean }
+export interface TypeMapEntry { path: string; eq: boolean; inline: boolean; contract: boolean; partialEq: boolean }
 
 /** A contract the emitter cannot write faithfully: reported to the user as an error of the contract, not as a fault of the emitter. */
 export class Refusal extends Error {}

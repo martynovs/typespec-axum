@@ -1,10 +1,10 @@
 /** Reads TypeSpec types and writes the Rust type each one is: the wire types of `types.rs`. */
-import { getDoc, getEncode, getNamespaceFullName, getSummary, getExamples, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
+import { getDoc, getEncode, getNamespaceFullName, getSummary, getExamples, isDeprecated, serializeValueAsJson, type Type, type Model, type ModelProperty, type Program } from "@typespec/compiler";
 import { type Config, Refusal } from "../config.js";
 import { constraintValues, constraints, facts } from "../constraints.js";
-import { constPrefix, isKeyword, jsonText, q, rustField, rustJson } from "../rust.js";
-import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, literalSchemaFn, manualSchema, partialSchemaFn, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
-import { inlineKey, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "../schema.js";
+import { constPrefix, isKeyword, jsonText, lastSegment, q, rustField, rustJson, rustStr } from "../rust.js";
+import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, peqMarker, literalSchemaFn, manualSchema, partialSchemaFn, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
+import { contractKey, contractSchemaName, forSchema, inlineKey, lacksToSchema, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "../schema.js";
 import { pascalIdent, uniqueNames } from "../rust.js";
 
 
@@ -307,9 +307,95 @@ export class TypeWriter {
     this.mappedKeys.add(key);
     // One that names no schema of the document (`u128`, a `std` type) is written in place in a hand-written schema.
     if (entry.inline) this.config.inlined.add(inlineKey(entry.path));
+    // One whose schema is the contract's is told by a type of the generated code that implements what utoipa asks.
+    if (entry.contract && this.documenting) {
+      this.config.inlined.add(contractKey(entry.path));
+      this.contractSchema(t, entry);
+    }
     // A mapped scalar is written as text where one is needed (a `text/plain` body): it is taken to be `Display`.
     if (t.kind === "Scalar") this.scalars.add(entry.path.slice(entry.path.lastIndexOf(":") + 1));
     return entry.path;
+  }
+
+  /**
+   * The type of the generated code that says the schema of a mapped type of `schema: contract`: the type is the application's and has no
+   * schema of its own, so the document is written from the contract's model, enum or scalar, under the name the mapped path has.
+   */
+  private contractSchema(t: Type & { name?: string }, entry: { path: string }): void {
+    const name = contractSchemaName(entry.path);
+    this.define(name, `contract:${entry.path}`, undefined, (name) => {
+      const deps: string[] = [];
+      const inlined = this.config.inlined;
+      const extras = (target: Type) => {
+        const values: Record<string, unknown> = { ...constraintValues(this.program, target) };
+        const doc = getDoc(this.program, target);
+        if (doc) values.description = doc;
+        const examples = getExamples(this.program, target as any);
+        if (examples.length) values.example = serializeValueAsJson(this.program, examples[0].value, target as any);
+        if (isDeprecated(this.program, target)) values.deprecated = true;
+        if (target.kind === "ModelProperty" && target.defaultValue) values.default = serializeValueAsJson(this.program, target.defaultValue, target.type);
+        return values;
+      };
+      /** A schema with what the contract states of its target beside it (a doc, a limit). */
+      const stated = (schema: string, target: Type) => {
+        const values = extras(target);
+        return Object.keys(values).length
+          ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
+          : schema;
+      };
+      /** The schema of a literal type, or of a union of literals (and `null`), as the contract states it. */
+      const literalJson = (type: Type): string | undefined => {
+        if (type.kind === "String") return `json!({"type": "string", "enum": [${q(type.value)}]})`;
+        if (type.kind === "Number") return `json!({"type": ${q(Number.isInteger(type.value) ? "integer" : "number")}, "enum": [${type.value}]})`;
+        if (type.kind === "Boolean") return `json!({"type": "boolean", "enum": [${type.value}]})`;
+        if (type.kind === "Intrinsic" && type.name === "null") return `json!({"type": "null"})`;
+        if (type.kind !== "Union") return undefined;
+        const variants = [...type.variants.values()].map((v) => v.type);
+        const literals = variants.filter((v) => v.kind === "String" || v.kind === "Number");
+        const nulls = variants.filter((v) => v.kind === "Intrinsic" && v.name === "null");
+        if (literals.length === 0 || literals.length + nulls.length !== variants.length) return undefined;
+        const strings = literals.every((v) => v.kind === "String");
+        const numbers = literals.every((v) => v.kind === "Number");
+        if (!strings && !numbers) return undefined;
+        const values = literals.map((v) => (v.kind === "String" ? q(v.value) : String(v.value)));
+        const enumeration = `json!({"type": ${q(strings ? "string" : literals.every((v) => v.kind === "Number" && Number.isInteger(v.value)) ? "integer" : "number")}, "enum": [${values.join(", ")}]})`;
+        return nulls.length ? `json!({"anyOf": [${enumeration}, {"type": "null"}]})` : enumeration;
+      };
+      let schema: string;
+      if (t.kind === "Model") {
+        const lines = [`let ${t.properties.size || t.baseModel ? "mut " : ""}properties = serde_json::Map::new();`];
+        const required: string[] = [];
+        const all = ownAndInherited(t);
+        for (const p of all) {
+          const ty = this.rust(p.type);
+          deps.push(...schemaDeps(ty, inlined));
+          const literal = literalJson(p.type);
+          lines.push(`properties.insert(${q(p.name)}.to_owned(), ${stated(literal ?? schemaExpr(ty, inlined), p)});`);
+          if (!p.optional) required.push(p.name);
+        }
+        const extra: string[] = [];
+        if (required.length) extra.push(`schema["required"] = json!([${required.map(q).join(", ")}]);`);
+        if (t.indexer) {
+          const value = isNever(t.indexer.value) ? "json!(false)" : schemaExpr(this.rust(t.indexer.value), inlined);
+          if (!isNever(t.indexer.value)) deps.push(...schemaDeps(this.rust(t.indexer.value), inlined));
+          extra.push(`schema["additionalProperties"] = ${value};`);
+        }
+        schema = stated(`{ ${lines.join(" ")} let ${extra.length ? "mut " : ""}schema = json!({"type": "object", "properties": properties}); ${extra.join(" ")} schema }`, t);
+      } else if (t.kind === "Enum") {
+        const values = [...t.members.values()].map((m) => m.value ?? m.name);
+        const numeric = values.every((v) => typeof v === "number");
+        schema = stated(`json!({"type": ${q(numeric ? (values.every((v) => Number.isInteger(v)) ? "integer" : "number") : "string")}, "enum": [${values.map((v) => (typeof v === "number" ? String(v) : q(String(v)))).join(", ")}]})`, t);
+      } else if (t.kind === "Scalar") {
+        const root = this.rootOf(t);
+        deps.push(...schemaDeps(root, inlined));
+        schema = stated(schemaExpr(root, inlined), t);
+      } else {
+        throw new Refusal(`type-map: ${entry.path} is mapped with schema: contract, which takes a model, an enum or a scalar`);
+      }
+      return `/// The schema of \`${entry.path}\` in the document, written from the contract: the type is the application's and has no schema of its own.
+pub struct ${name};
+${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
+    });
   }
 
   /**
@@ -317,19 +403,31 @@ export class TypeWriter {
    * the application writes that its `type-map` entry does not say is, nor a type made of one of those.
    */
   resolveEq(code: string): string {
-    const notEq = new Set<string>();
-    const unlike = (part: string) => /\bf(32|64)\b/.test(part) || [...this.config.typeMap.values()].some((e) => !e.eq && new RegExp(`(?<![\\w:])${e.path.replace(/[$()*+.?[\\\]^{|}]/g, "\\$&")}(?!\\w)`).test(part));
-    for (const [name, parts] of this.parts) if (parts.some(unlike)) notEq.add(name);
-    for (let changed = true; changed; ) {
-      changed = false;
-      for (const [name, parts] of this.parts) {
-        if (!notEq.has(name) && parts.some((part) => (part.match(/\b[A-Z]\w*\b/g) ?? []).some((inner) => notEq.has(inner)))) {
-          notEq.add(name);
-          changed = true;
+    const entries = [...this.config.typeMap.values()];
+    const names = (part: string, path: string) => namesPath(part, path);
+    /** Every defined type that holds a part `direct` says is one, or a type that does, however deep. */
+    const holders = (direct: (part: string) => boolean) => {
+      const out = new Set<string>();
+      for (const [name, parts] of this.parts) if (parts.some(direct)) out.add(name);
+      for (let changed = true; changed; ) {
+        changed = false;
+        for (const [name, parts] of this.parts) {
+          const inner = (part: string) => withoutPaths(part, entries.map((e) => e.path)).match(/\b[A-Z]\w*\b/g) ?? [];
+          if (!out.has(name) && parts.some((part) => inner(part).some((other) => out.has(other)))) {
+            out.add(name);
+            changed = true;
+          }
         }
       }
-    }
-    return code.replace(/⟦eq:(\w+)⟧/g, (_, name) => (this.config.deriveEq && !notEq.has(name) ? ", Eq" : ""));
+      return out;
+    };
+    // A float is not `Eq`, nor is a type the application writes that its entry does not say is.
+    const notEq = holders((part) => /\bf(32|64)\b/.test(part) || entries.some((e) => !e.eq && names(part, e.path)));
+    // A type the application writes that its entry says is not `PartialEq` (`partial-eq: false`) makes every type that holds it neither.
+    const notPartial = holders((part) => entries.some((e) => !e.partialEq && names(part, e.path)));
+    return code
+      .replace(/⟦peq:(\w+)⟧/g, (_, name) => (notPartial.has(name) ? "" : ", PartialEq"))
+      .replace(/⟦eq:(\w+)⟧/g, (_, name) => (this.config.deriveEq && !notEq.has(name) && !notPartial.has(name) ? ", Eq" : ""));
   }
 
   /** Whether the types carry a schema: the document is utoipa's. */
@@ -406,7 +504,7 @@ export class TypeWriter {
     this.define(name, `nullable:${inner}`, undefined, (name) => {
       this.parts.set(name, [inner]);
       return `/// A \`${inner}\` or \`null\`, the value of a map.
-#[derive(Debug, Clone, PartialEq${eqMarker(name)}, Serialize, Deserialize)]
+#[derive(Debug, Clone${peqMarker(name)}${eqMarker(name)}, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ${name}(pub Option<${inner}>);
 
@@ -477,7 +575,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       if (getEncode(this.program, t)) throw new Refusal(`${name}: @encode is not generated: the wire type would differ from the Rust type`);
       this.scalars.add(name);
       const base = t.baseScalar ? this.rust(t.baseScalar) : "String";
-      if (this.documenting && [...this.config.typeMap.values()].some((e) => onlyPartial(e) && base === e.path)) throw new Refusal(`${name}: a scalar that extends ${base}, a type-map entry with inline: true, is a newtype that derives ToSchema over it, which it has not: map ${name} too`);
+      if (this.documenting && [...this.config.typeMap.values()].some((e) => lacksToSchema(e) && base === e.path)) throw new Refusal(`${name}: a scalar that extends ${base}, a type-map entry with inline: true or schema: contract, is a newtype that derives ToSchema over it, which it has not: map ${name} too`);
       this.parts.set(name, [base]);
       const root = this.rootOf(t);
       // A derive cannot write a constraint on a newtype's field, so a constrained scalar takes a schema written by hand.
@@ -488,7 +586,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         name,
         base,
         // A scalar that extends one the application writes is `Eq` as that one is, and its `Hash` is not known.
-        derives: base.includes("::") ? `Debug, Clone, PartialEq${eqMarker(name)}` : root.startsWith("f") ? "Debug, Clone, PartialEq" : "Debug, Clone, PartialEq, Eq, Hash",
+        derives: base.includes("::") ? `Debug, Clone${peqMarker(name)}${eqMarker(name)}` : root.startsWith("f") ? "Debug, Clone, PartialEq" : "Debug, Clone, PartialEq, Eq, Hash",
         attr: constrained ? "" : this.schemaAttr(t).trim(),
         schema: !constrained && this.documenting,
       });
@@ -672,7 +770,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         this.parts.set(name, [inner]);
         // A derive cannot be told not to follow the type inside a newtype, so one that holds itself has its schema written by hand.
         const recursive = this.reachesInProgress(inner) || inner.includes("serde_json::Value");
-        if (this.documenting && [...this.config.typeMap.values()].some((e) => onlyPartial(e) && namesPath(inner, e.path))) throw new Refusal(`${name}: a list or a map of a type-map entry with inline: true is a newtype that derives ToSchema over it, which it has not: put it in a model, or map ${name} too`);
+        if (this.documenting && [...this.config.typeMap.values()].some((e) => lacksToSchema(e) && namesPath(inner, e.path))) throw new Refusal(`${name}: a list or a map of a type-map entry with inline: true or schema: contract is a newtype that derives ToSchema over it, which it has not: put it in a model, or map ${name} too`);
         const code = containerNewtype({ doc: this.doc(t), name, inner, schema: !recursive && this.documenting }) + constantsImpl(name, facts(this.program, t, name));
         if (!recursive) return code;
         const description = getDoc(this.program, t);
@@ -873,7 +971,9 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     ];
     // utoipa writes a `serde_json::Value` as an empty schema, which it cannot read back: say it is an object, as everywhere else it is written.
     const objectOf = (text: string) => text.replace(/serde_json::Value/g, "Object");
-    const extra = written.map((e) => (e.startsWith("value_type = ") ? objectOf(e) : e));
+    const extra = written.map((e) => (e.startsWith("value_type = ") ? forSchema(objectOf(e), this.config.inlined) : e));
+    // A type whose schema is the contract's has no `ToSchema` for the derive: the field says the type that has.
+    if (this.documenting && !extra.some((e) => e.startsWith("value_type = ")) && [...this.config.typeMap.values()].some((e) => e.contract && namesPath(plain, e.path))) extra.push(`value_type = ${forSchema(plain, this.config.inlined)}`);
     if (!written.some((e) => e.startsWith("value_type = ")) && !literal && ty.includes("serde_json::Value")) extra.push(`value_type = ${objectOf(ty)}`);
     return { doc: this.doc(source, "    "), attr: this.schemaAttr(p, extra), serde: p.name, ident: rustField(p.name), ty: optional, optional: p.optional, deserialize, consts: facts(this.program, source, ty, constPrefix(rustField(p.name))) };
   }

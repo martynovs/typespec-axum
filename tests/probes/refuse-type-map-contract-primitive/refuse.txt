@@ -1,0 +1,1 @@
+schema: contract is for a model, an enum or a scalar of another crate

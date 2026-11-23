@@ -1,0 +1,3 @@
+type-map.Wire.path=crate::hand::Challenge
+type-map.Wire.schema=contract
+type-map.Wire.inline=true

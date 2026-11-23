@@ -1,0 +1,6 @@
+type-map.Challenge.path=crate::hand::Challenge
+type-map.Challenge.schema=contract
+type-map.Challenge.partial-eq=false
+type-map.Transport.path=crate::hand::Transport
+type-map.Transport.schema=contract
+type-map.Transport.eq=true
