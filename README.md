@@ -392,6 +392,7 @@ bun install
 just test       # build, regenerate examples/pets, run its tests (needs rustfmt and cargo)
 just probes     # compile tests/probes: contracts that must be emitted and built, or refused with a named diagnostic
 just check      # fail when the committed generated files are not what the emitter writes
+just webauthn   # the real webauthn-rs-proto types as the bodies and answers of a generated server (needs the crate from crates.io)
 just serve      # run the example
 ```
 

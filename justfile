@@ -45,3 +45,7 @@ serve: generate
 # Fail when the committed generated files are not what the emitter writes.
 check: generate
     git diff --exit-code -- examples/pets/generated examples/split/generated
+
+# The real WebAuthn types (webauthn-rs-proto) as the bodies and answers of a generated server, with a derived and a typespec document.
+webauthn: build
+    tests/webauthn/run.sh
