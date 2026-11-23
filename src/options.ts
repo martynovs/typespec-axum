@@ -207,6 +207,7 @@ export function resolveConfig(o: EmitterOptions, generator: string): { config: C
       extensionExpr: expr.map,
       inlined: new Set(),
       exact: new Map(),
+      exactProperties: [],
     },
   };
 }

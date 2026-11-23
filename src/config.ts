@@ -44,6 +44,8 @@ export interface Config {
   inlined: Set<string>;
   /** The components whose schema utoipa cannot hold (a `const`): the JSON of each is put into the finished document as it is. */
   exact: Map<string, string>;
+  /** The properties whose schema utoipa cannot hold (a keyword beside `anyOf` or `$ref`): `[component, property, json]`, put into the finished document as they are. */
+  exactProperties: [string, string, string][];
 }
 
 /** How an `x-*` extension of an operation is lowered: `const <const>: <type> = <macro>!(<the extension's JSON>);` in the operation's module. */

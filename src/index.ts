@@ -28,7 +28,7 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
   const types = new TypeWriter(program, config);
   let files: ReturnType<typeof generate>;
   try {
-    files = generate(program, config, { rust: (t) => types.rust(t), untyped: (ty) => types.untyped(ty), known: (name) => types.defs.has(name), displayable: (ty) => types.displayable(ty), hidden: () => types.hidden, closure: (roots) => types.closure(roots), mappedHeld: (names) => types.mappedHeld(names), generic: (name) => types.genericStructs.has(name), contractScalars: () => types.contractScalarStructs() }, services);
+    files = generate(program, config, { rust: (t) => types.rust(t), untyped: (ty) => types.untyped(ty), known: (name) => types.defs.has(name), displayable: (ty) => types.displayable(ty), hidden: () => types.hidden, closure: (roots) => types.closure(roots), mappedHeld: (names) => types.mappedHeld(names), generic: (name) => types.genericStructs.has(name), contractScalars: () => types.contractScalarStructs(), contractScalarNames: () => types.contractScalarNames() }, services);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     return refuse(error.message);

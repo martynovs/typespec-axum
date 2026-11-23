@@ -173,6 +173,8 @@ fn finish(
     operations: &[(&str, &[&str], bool, Option<bool>)],
     exact: &[(&str, &str)],
     shapes: &[(&str, &str, &str, &str)],
+    exact_properties: &[(&str, &str, &str)],
+    computed: &[(&str, serde_json::Value)],
 ) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document
@@ -267,6 +269,26 @@ fn finish(
             schemas.remove(*name);
         }
     }
+    // What utoipa cannot hold is written into the document as it is: a type of the application's whose schema is the contract's, and a property with a keyword beside anyOf or a reference.
+    for (name, schema) in computed {
+        if let Some(held) = document
+            .pointer_mut("/components/schemas")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|schemas| schemas.get_mut(*name))
+        {
+            *held = schema.clone();
+        }
+    }
+    for (component, property, schema) in exact_properties {
+        if let Some(held) = document
+            .pointer_mut("/components/schemas")
+            .and_then(|schemas| schemas.get_mut(*component))
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(|properties| properties.get_mut(*property))
+        {
+            *held = serde_json::from_str(schema).expect("the exact property schema is JSON");
+        }
+    }
     // What utoipa cannot hold (a const) is written into the document as it is.
     for (name, schema) in exact {
         if let Some(held) = document
@@ -330,7 +352,6 @@ fn finish(
             }
         }
     }
-    // A parameter that may be null: the TypeSpec document writes anyOf of the type and null, where utoipa writes a list of types.
     if let Some(schemas) = document.pointer_mut("/components/schemas") {
         examples_as_list(schemas);
     }
@@ -1478,6 +1499,8 @@ pub mod petstore {
                 ("pet_events", &[], false, None),
                 ("touch_pet", &[], true, Some(false)),
             ],
+            &[],
+            &[],
             &[],
             &[],
         );

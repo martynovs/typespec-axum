@@ -714,3 +714,20 @@ fn a_type_only_a_nullable_field_names_is_a_component() {
     assert!(text.contains("#/components/schemas/Far"), "{holder}");
     assert!(holder["far"].to_string().contains("null") && holder["fars"].to_string().contains("null"), "{holder}");
 }
+
+#[cfg(document_typespec)]
+#[test]
+fn a_typespec_document_says_what_the_typespec_document_says() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "closed_model").expect("a document");
+    // A closed model has no property left unevaluated, and no `additionalProperties: false`.
+    let closed = &document["components"]["schemas"]["Closed"];
+    assert_eq!(closed["unevaluatedProperties"], serde_json::json!({"not": {}}), "{closed}");
+    assert!(closed.get("additionalProperties").is_none(), "{closed}");
+    // An operation with no parameters has an empty list of them.
+    for (path, item) in document["paths"].as_object().expect("paths") {
+        for (method, operation) in item.as_object().expect("a path item") {
+            assert!(operation["parameters"].is_array(), "{method} {path} has a list of parameters: {operation}");
+        }
+    }
+}

@@ -121,6 +121,6 @@ export function schemaDeps(ty: string, inlined: ReadonlySet<string>, prefix = ""
   const told = schemaTypes(inlined).get(ty);
   if (told?.inline) return [`~${prefix}${told.struct}`];
   if (told) return [`${prefix}${told.struct}#${told.name}`];
-  if (!isNamed(ty) || ty === "String" || inlined.has(inlineKey(ty))) return [];
+  if (!isNamed(ty) || ty === "String" || ty === "serde_json::Value" || inlined.has(inlineKey(ty))) return [];
   return inlined.has(lastSegment(ty)) ? [`~${ty}`] : [ty];
 }

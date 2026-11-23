@@ -5,7 +5,7 @@ import { resolveInfo } from "@typespec/openapi";
 import { type Events, type Op, type Types, readOp } from "./contract.js";
 import { type Config, Refusal } from "./config.js";
 import { contractSchemaName, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
-import { generatedNotice, isKeyword, q, rustStr } from "./rust.js";
+import { generatedNotice, isKeyword, lastSegment, q, rustStr } from "./rust.js";
 import { manualSchema } from "./types/templates.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, operationModule } from "./server/templates.js";
 import { CLIENT_CRATES, CLIENT_METHODS, checkClientNames, clientHeader, clientModule } from "./client/templates.js";
@@ -259,6 +259,8 @@ export function generate(program: Program, config: Config, types: Types, service
       components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components.map((path) => ([...config.typeMap.values()].some((e) => e.path === path && e.contract) ? `${config.typesPath}::${contractSchemaName(path)}` : path)), ...types.contractScalars().map((struct) => `${config.typesPath}::${struct}`), ...unions.keys()],
       items: [...schemaOf].map(([name, s]) => `(${q(name + "Item")}, ${s.fn}())`),
       shapes: config.document === "typespec" ? [...ops, ...sharedOps].flatMap(shapesOf) : [],
+      exactProperties: config.document === "typespec" ? config.exactProperties.map(([component, property, json]) => `(${q(component)}, ${q(property)}, ${rustStr(json)})`) : [],
+      computed: config.document === "typespec" ? [...[...config.typeMap.values()].filter((e) => e.contract && types.known(contractSchemaName(e.path))).map((e) => e.path).map((path) => [lastSegment(path), `${config.typesPath}::${contractSchemaName(path)}`]), ...types.contractScalarNames()].map(([name, struct]) => `(${q(name)}, ${struct}::exact())`) : [],
       exact: [...config.exact].map(([name, json]) => `(${q(name)}, ${rustStr(json)})`),
       operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [

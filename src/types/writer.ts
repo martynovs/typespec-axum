@@ -331,6 +331,11 @@ export class TypeWriter {
     return [...this.contractScalars.values()].map((s) => s.struct);
   }
 
+  /** `[component, type]` of each of them, the type written by its path from the types module. */
+  contractScalarNames(): [string, string][] {
+    return [...this.contractScalars.values()].map((s) => [s.name, `${this.config.typesPath}::${s.struct}`]);
+  }
+
   /** A scalar of the contract the application writes as a primitive (`Instant` as a `String`) keeps its own component in the document, and fields of it refer to it. */
   private contractScalar(t: Type, path: string): void {
     if (t.kind !== "Scalar") throw new Refusal(`type-map: ${path} is mapped with schema: contract, which for a primitive takes a scalar of the contract`);
@@ -340,7 +345,8 @@ export class TypeWriter {
     this.contractScalars.set(t, { struct, name });
     const written = this.define(struct, `contract-scalar:${this.identity(t)}`, undefined, (struct) => {
       const { schema, deps } = this.schemaOf(t, path);
-      return `/// The schema of the scalar \`${name}\` in the document: the application writes it as \`${path}\`.\npub struct ${struct};\n${manualSchema(struct, schema, deps, name)}`;
+      const exact = this.schemaOf(t, path, true).schema;
+      return `/// The schema of the scalar \`${name}\` in the document: the application writes it as \`${path}\`.\npub struct ${struct};\nimpl ${struct} {\n    /// The schema as it is written, for the finished document.\n    pub fn exact() -> serde_json::Value {\n        ${exact}\n    }\n}\n${manualSchema(struct, schema, deps, name)}`;
     });
     if (written !== struct) throw new Refusal(`type-map: ${name} is mapped with schema: contract, so its schema type is ${struct}, which is also a type of the contract: rename one in the contract`);
   }
@@ -353,8 +359,15 @@ export class TypeWriter {
     const name = contractSchemaName(entry.path);
     const written = this.define(name, `contract:${entry.path}`, undefined, (name) => {
       const { schema, deps } = this.schemaOf(t, entry.path);
+      const exact = this.schemaOf(t, entry.path, true).schema;
       return `/// The schema of \`${entry.path}\` in the document, written from the contract: the type is the application's and has no schema of its own.
 pub struct ${name};
+impl ${name} {
+    /// The schema as it is written, for the finished document: utoipa holds no keyword beside a reference.
+    pub fn exact() -> serde_json::Value {
+        ${exact}
+    }
+}
 ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
     });
     if (written !== name) throw new Refusal(`type-map: ${entry.path} is mapped with schema: contract, so its schema type is ${name}, which is also a type of the contract: rename one in the contract`);
@@ -364,7 +377,7 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
    * The schema of a model, an enum or a scalar of the contract, as a Rust expression of a `serde_json::Value`, and the types it refers to:
    * written from the contract, for a type that has no schema of its own (`what` names it in a refusal).
    */
-  private schemaOf(t: Type & { name?: string }, what: string): { schema: string; deps: string[] } {
+  private schemaOf(t: Type & { name?: string }, what: string, exact = false): { schema: string; deps: string[] } {
     // An instance whose schema is being written and is met again in it (a template that holds an instance of itself) is a reference to its component.
     const inlined = this.instancesInProgress.length ? asReferences(this.config.inlined, new Set(this.instancesInProgress)) : this.config.inlined;
     const deps: string[] = [];
@@ -382,7 +395,7 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
     const stated = (schema: string, target: Type) => {
       const values = extras(target);
       return Object.keys(values).length
-        ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() && ${Object.keys(values).some((k) => k !== "description")} { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
+        ? `{ let mut value = ${schema}; ${exact ? "" : `if value.get("$ref").is_some() && ${Object.keys(values).some((k) => k !== "description")} { value = json!({"allOf": [value]}); } `}if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
         : schema;
     };
     /** The schema of a literal type, or of a union of literals (and `null`), as the contract states it. */
@@ -418,9 +431,13 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
       const extra: string[] = [];
       if (required.length) extra.push(`schema["required"] = json!([${required.map(q).join(", ")}]);`);
       if (t.indexer) {
-        const value = isNever(t.indexer.value) ? "json!(false)" : schemaExpr(this.rust(t.indexer.value), inlined);
-        if (!isNever(t.indexer.value)) deps.push(...schemaDeps(this.rust(t.indexer.value), inlined));
-        extra.push(`schema["additionalProperties"] = ${value};`);
+        if (isNever(t.indexer.value)) {
+          // A closed model: the TypeSpec document says no property is left unevaluated.
+          extra.push(exact ? `schema["unevaluatedProperties"] = json!({"not": {}});` : `schema["additionalProperties"] = json!(false);`);
+        } else {
+          deps.push(...schemaDeps(this.rust(t.indexer.value), inlined));
+          extra.push(`schema["additionalProperties"] = ${schemaExpr(this.rust(t.indexer.value), inlined)};`);
+        }
       }
       schema = stated(`{ ${lines.join(" ")} let ${extra.length ? "mut " : ""}schema = json!({"type": "object", "properties": properties}); ${extra.join(" ")} schema }`, t);
     } else if (t.kind === "Enum") {
@@ -1141,6 +1158,11 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
   private plainSchema(v: Type, property: ModelProperty): object | undefined {
     const scalar = this.contractScalars.get(v);
     if (scalar) return { $ref: `#/components/schemas/${scalar.name}` };
+    // A type the application writes whose schema is the contract's is a component too.
+    if (v.kind === "Model" || v.kind === "Enum") {
+      const told = schemaTypes(this.config.inlined).get(this.rust(v));
+      if (told && !told.inline) return { $ref: `#/components/schemas/${told.name}` };
+    }
     const withLimits = (schema: object) => schema; // the limits a property states are the union's, beside its anyOf
     if (v.kind === "Model" && v.name === "Array" && v.indexer) {
       const items = this.plainSchema(v.indexer.value, property);
@@ -1188,7 +1210,12 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     // The literals of one kind are one `enum`, as `@typespec/openapi3` groups them (its annotated strategy writes a `const` each, which utoipa cannot hold).
     const members = this.groupLiterals(variants, schemas as object[]);
     // The limits a property states are beside the `anyOf`, as `@typespec/openapi3` applies them to the whole property.
-    return this.schemaFn(owner, property, members.length === 1 ? members[0]! : { anyOf: members, ...(nullable ? constraintValues(this.program, property) : {}) });
+    const body = (list: object[]) => (list.length === 1 ? list[0]! : { anyOf: list, ...(nullable ? constraintValues(this.program, property) : {}) });
+    // The annotated strategy writes each literal as a `const`, which utoipa cannot hold: the finished document has it, the function the plain form.
+    const annotated = this.config.enumStrategy === "annotated" && variants.length > 1 && variants.some((v) => v.kind === "String" || v.kind === "Number" || v.kind === "Boolean")
+      ? body(schemas.map((s, i) => (variants[i].kind === "String" || variants[i].kind === "Number" || variants[i].kind === "Boolean" ? { const: (variants[i] as any).value } : s) as object))
+      : undefined;
+    return this.schemaFn(owner, property, body(members), annotated);
   }
 
   /**
@@ -1215,7 +1242,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
   }
 
   /** The function that gives a field the schema `body`, with the field's own doc as its description. Returns its name. */
-  private schemaFn(owner: string, property: ModelProperty, body: object): string {
+  private schemaFn(owner: string, property: ModelProperty, body: object, exactBody?: object): string {
     const name = this.fnName("schema", owner, property);
     this.alias(`fn ${name}`, () => {
       // With `schema_with` the derive no longer adds the field's doc as its description.
@@ -1223,7 +1250,10 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       const fallback = property.defaultValue ? { default: serializeValueAsJson(this.program, property.defaultValue, property.type) } : {};
       const examples = getExamples(this.program, property);
       const example = examples.length ? { example: serializeValueAsJson(this.program, examples[0].value, property) } : {};
-      return literalSchemaFn(name, JSON.stringify({ ...body, description, ...fallback, ...example }));
+      const extras = { description, ...fallback, ...example };
+      // utoipa drops a keyword written beside `anyOf` or `$ref`: the finished document takes the property as it is written here.
+      if (this.config.document === "typespec") this.config.exactProperties.push([owner, property.name, JSON.stringify({ ...(exactBody ?? body), ...extras })]);
+      return literalSchemaFn(name, JSON.stringify({ ...body, ...extras }));
     });
     return name;
   }

@@ -101,6 +101,8 @@ export interface Types {
   generic: (name: string) => boolean;
   /** The types that say the schema of the scalars the application writes as a primitive (`Instant`): components of the document. */
   contractScalars: () => string[];
+  /** `[component, type]` of each scalar the application writes as a primitive: its component and the type that says its schema. */
+  contractScalarNames: () => [string, string][];
 }
 
 /** The tags of an operation: those of the interfaces and namespaces it sits in, outermost first, and its own. */

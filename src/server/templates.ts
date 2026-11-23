@@ -171,7 +171,7 @@ fn missing_segment() -> AxResponse {
 
 ${c.document === "none" ? "" : `/// What utoipa cannot say, applied to the document it built: OpenAPI 3.2, no license, and the stream item schemas written in place
 /// of their placeholder components.
-fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)], exact: &[(&str, &str)], shapes: &[(&str, &str, &str, &str)]) {
+fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)], exact: &[(&str, &str)], shapes: &[(&str, &str, &str, &str)], exact_properties: &[(&str, &str, &str)], computed: &[(&str, serde_json::Value)]) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document.get_mut("info").and_then(serde_json::Value::as_object_mut) {
         info.remove("license");
@@ -223,6 +223,17 @@ fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)],
             schemas.remove(*name);
         }
     }
+    // What utoipa cannot hold is written into the document as it is: a type of the application's whose schema is the contract's, and a property with a keyword beside anyOf or a reference.
+    for (name, schema) in computed {
+        if let Some(held) = document.pointer_mut("/components/schemas").and_then(serde_json::Value::as_object_mut).and_then(|schemas| schemas.get_mut(*name)) {
+            *held = schema.clone();
+        }
+    }
+    for (component, property, schema) in exact_properties {
+        if let Some(held) = document.pointer_mut("/components/schemas").and_then(|schemas| schemas.get_mut(*component)).and_then(|schema| schema.get_mut("properties")).and_then(|properties| properties.get_mut(*property)) {
+            *held = serde_json::from_str(schema).expect("the exact property schema is JSON");
+        }
+    }
     // What utoipa cannot hold (a const) is written into the document as it is.
     for (name, schema) in exact {
         if let Some(held) = document.pointer_mut("/components/schemas").and_then(serde_json::Value::as_object_mut).and_then(|schemas| schemas.get_mut(*name)) {
@@ -262,8 +273,16 @@ fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)],
             }
         }
     }
-    // A parameter that may be null: the TypeSpec document writes anyOf of the type and null, where utoipa writes a list of types.
-${c.document === "typespec" ? `    let paths = document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten();
+${c.document === "typespec" ? `    // An operation with no parameters has an empty list of them in the TypeSpec document; utoipa leaves the key out.
+    for (_, path) in document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten() {
+        for (_, operation) in path.as_object_mut().into_iter().flatten() {
+            if let Some(operation) = operation.as_object_mut() {
+                operation.entry("parameters").or_insert_with(|| json!([]));
+            }
+        }
+    }
+` : ""}${c.document === "typespec" ? `    // A parameter that may be null: the TypeSpec document writes anyOf of the type and null, where utoipa writes a list of types.
+    let paths = document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten();
     for (_, path) in paths {
         for (_, operation) in path.as_object_mut().into_iter().flatten() {
             for parameter in operation.get_mut("parameters").and_then(serde_json::Value::as_array_mut).into_iter().flatten() {
@@ -283,12 +302,37 @@ ${c.document === "typespec" ? `    let paths = document.get_mut("paths").and_the
             }
         }
     }
+` : ""}${c.document === "typespec" ? `    strip_property_names(document);
 ` : ""}    if let Some(schemas) = document.pointer_mut("/components/schemas") {
         examples_as_list(schemas);
     }
 }
 
-/// A schema's \`example\` is the list \`examples\` in the TypeSpec document (and in OpenAPI 3.1 and later).
+${c.document === "typespec" ? `/// utoipa says the names of a map are strings, which the TypeSpec document leaves unsaid.
+fn strip_property_names(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("propertyNames") == Some(&json!({"type": "string"})) {
+                map.remove("propertyNames");
+            }
+            // A closed model: the TypeSpec document says no property is left unevaluated, where utoipa says no property is additional.
+            if map.get("additionalProperties") == Some(&json!(false)) {
+                map.remove("additionalProperties");
+                map.insert("unevaluatedProperties".to_owned(), json!({"not": {}}));
+            }
+            // An example, a default or a constant is a value of the contract, not a schema: it is left as it is.
+            for (key, held) in map.iter_mut() {
+                if !matches!(key.as_str(), "example" | "examples" | "default" | "const" | "enum") {
+                    strip_property_names(held);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_property_names),
+        _ => {}
+    }
+}
+
+` : ""}/// A schema's \`example\` is the list \`examples\` in the TypeSpec document (and in OpenAPI 3.1 and later).
 fn examples_as_list(schema: &mut serde_json::Value) {
     match schema {
         serde_json::Value::Object(map) => {
@@ -639,6 +683,10 @@ export const contractModule = (c: {
   exact: string[];
   /** What utoipa writes otherwise than the TypeSpec document: `(operationId, place, name, shape)` of a parameter format or a response header. */
   shapes: string[];
+  /** `(component, property, json)` of the properties written into the finished document as they are. */
+  exactProperties: string[];
+  /** `(name, schema)` of the components whose exact schema a type of the generated code gives. */
+  computed: string[];
   /** `(operationId, &[tags], deprecated, whether the body is required)` of each operation. */
   operations: string[];
   body: string[];
@@ -694,7 +742,7 @@ ${c.documented ? `
     /// The OpenAPI document of this contract, as the TypeSpec emitter writes it.
     pub fn document() -> serde_json::Value {
         let mut document = serde_json::to_value(<ApiDoc as utoipa::OpenApi>::openapi()).expect("the document serializes");
-        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}], &[${c.exact.join(", ")}], &[${c.shapes.join(", ")}]);
+        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}], &[${c.exact.join(", ")}], &[${c.shapes.join(", ")}], &[${c.exactProperties.join(", ")}], &[${c.computed.join(", ")}]);
         document
     }` : ""}
 }`;

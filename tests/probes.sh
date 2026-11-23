@@ -102,7 +102,7 @@ reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 utoipa = "6"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(no_document)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(no_document)', 'cfg(document_typespec)'] }
 TOML
 if [ "${DOCUMENT:-derived}" = none ]; then
   # No document means no utoipa: the crate must build without it.
@@ -110,7 +110,8 @@ if [ "${DOCUMENT:-derived}" = none ]; then
   export RUSTFLAGS="-D warnings --cfg no_document"
   export RUSTDOCFLAGS="--cfg no_document"
 else
-  export RUSTFLAGS="-D warnings"
+  # A test of what only a `typespec` document says is for that mode.
+  export RUSTFLAGS="-D warnings${DOCUMENT:+ --cfg document_$DOCUMENT}"
 fi
 [ -f "$work/crate/Cargo.lock" ] || cp examples/pets/Cargo.lock "$work/crate/Cargo.lock"
 cargo test --manifest-path "$work/crate/Cargo.toml" 2>&1 | tail -25
