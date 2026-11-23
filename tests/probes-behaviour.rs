@@ -582,3 +582,18 @@ fn a_type_with_no_trait_of_utoipa_has_the_contracts_schema() {
     assert_eq!(holder["challenge"]["$ref"], reference, "{}", schemas["Holder"]);
     assert_eq!(holder["many"]["items"]["$ref"], reference);
 }
+
+#[cfg(not(no_document))]
+#[test]
+fn a_type_of_another_crate_is_in_the_document_of_each_service_that_shares_it() {
+    use probes::type_map_contract_shared::api::{admin, probe};
+    for (name, document) in [("Probe", probe::document()), ("Admin", admin::document())] {
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(schemas["Challenge"]["required"], serde_json::json!(["challenge", "kind"]), "{name}: {schemas}");
+        let schema = &document["paths"]["/challenge"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["$ref"], "#/components/schemas/Challenge", "{name}");
+    }
+    // Only the service that has the operation says what it answers.
+    let admin = admin::document();
+    assert_eq!(admin["paths"]["/own"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["type"], "array");
+}
