@@ -152,3 +152,15 @@ ${lines(u.variants.map((v) => (v.ty === "()" ? `    ${v.name},` : `    ${v.name}
 export const literalSchemaFn = (name: string, schema: string) => `fn ${name}() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
     serde_json::from_str(${rustStr(schema)}).expect("the literal schema is valid")
 }`;
+
+/**
+ * The schema of a field that holds a type of a `PartialSchema` and no `ToSchema`, from an expression of `schemaExpr` (`schema_with`, with which
+ * the derive no longer adds the field's doc, so it is said here).
+ */
+export const partialSchemaFn = (name: string, schema: string, description?: string) => `fn ${name}() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    let ${description ? "mut " : ""}schema: serde_json::Value = ${schema};
+${description ? `    if let Some(object) = schema.as_object_mut() {
+        object.insert("description".to_owned(), json!(${rustStr(description)}));
+    }
+` : ""}    serde_json::from_value(schema).expect("the schema is valid")
+}`;

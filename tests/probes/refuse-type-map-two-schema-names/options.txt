@@ -1,0 +1,2 @@
+type-map.Limits.path=crate::hand::Limits
+type-map.Bounds.path=crate::other::Limits

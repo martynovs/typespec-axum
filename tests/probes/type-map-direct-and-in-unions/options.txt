@@ -1,0 +1,13 @@
+type-map.Limits.path=crate::hand::Limits
+type-map.Limits.eq=true
+type-map.Big.path=u128
+type-map.Big.eq=true
+derive-eq=true
+type-map.Host.path=std::string::String
+type-map.Host.eq=true
+type-map.Unused.path=crate::hand::Unused
+type-map.Shared::Cents.path=crate::hand::Money
+type-map.Shared::Cents.eq=true
+type-map.Token.path=crate::hand::Opaque
+type-map.Token.inline=true
+type-map.Token.eq=true

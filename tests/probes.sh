@@ -13,7 +13,7 @@ indent() { tail -8 "$1" | while IFS= read -r line; do echo "    $line"; done; }
 mode=${DOCUMENT:-derived}
 for dir in tests/probes/*/; do
   name=$(basename "$dir")
-  # `only.txt` names the document modes a probe is for (a probe about `type-map` is for `none`).
+  # `only.txt` names the document modes a probe is for (a probe whose refusal is about a document is for `derived` and `typespec`).
   if [ -f "$dir/only.txt" ] && ! grep -qw -- "$mode" "$dir/only.txt"; then continue; fi
   # `options.txt` holds more emitter options, one `name=value` per line.
   extra=()
@@ -108,6 +108,7 @@ if [ "${DOCUMENT:-derived}" = none ]; then
   # No document means no utoipa: the crate must build without it.
   grep -v '^utoipa' "$work/crate/Cargo.toml" >"$work/crate/Cargo.toml.new" && mv "$work/crate/Cargo.toml.new" "$work/crate/Cargo.toml"
   export RUSTFLAGS="-D warnings --cfg no_document"
+  export RUSTDOCFLAGS="--cfg no_document"
 else
   export RUSTFLAGS="-D warnings"
 fi

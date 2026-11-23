@@ -4,8 +4,9 @@
  */
 import type { Config, ExtensionExpr } from "../config.js";
 import type { Answer, Events, Op } from "../contract.js";
-import { lastSegment, q, rustJson } from "../rust.js";
+import { q, rustJson } from "../rust.js";
 import { constantsImpl } from "../types/templates.js";
+import { isInline, onlyPartial } from "../schema.js";
 
 const lines = (items: string[]) => items.join("\n");
 
@@ -408,7 +409,7 @@ ${o.body ? "            body," : ""}
 /** Envelope bodies are written out in place in the TypeSpec documents, so they are inlined here too. */
 const refOrInline = (ty: string, inlined: ReadonlySet<string>) =>
   ty === "serde_json::Value" ? "inline(Object)"
-    : inlined.has(lastSegment(ty)) || /^(String|bool|[iuf]\d+|Vec<.*>)$/.test(ty) ? `inline(${ty})` : ty;
+    : isInline(ty, inlined) || /^(String|bool|[iuf]\d+|Vec<.*>)$/.test(ty) ? `inline(${ty})` : ty;
 
 /** What a request body is, for utoipa: its type. Whether it may be left out is `finish`'s to say: an `Option` would also make it nullable. */
 const requestContent = (o: Op, config: Config) => refOrInline(o.body!, config.inlined);
@@ -416,8 +417,13 @@ const requestContent = (o: Op, config: Config) => refOrInline(o.body!, config.in
 /** The `#[utoipa::path]` of an operation: everything the TypeSpec operation states, so the document cannot drift from the route. */
 const utoipaPath = (o: Op, config: Config) => {
   const kinds: Record<string, string> = { path: "Path", query: "Query", header: "Header", cookie: "Cookie" };
-  const params = o.docParams.map((p) =>
-    `(${q(p.name)} = ${p.ty}, ${kinds[p.kind]}${p.description ? `, description = ${q(p.description)}` : ""}${p.attrs.map((a) => `, ${a}`).join("")}${p.explode === false ? ", explode = false" : ""})`);
+  // A parameter of a type of `inline: true` is written in place: utoipa would ask it for `ToSchema`. (An optional one is refused by `generate`.)
+  const explicit = new Set([...config.typeMap.values()].filter(onlyPartial).map((e) => e.path));
+  const params = o.docParams.map((p) => {
+    const inline = p.ty !== undefined && explicit.has(p.ty);
+    const ty = inline ? `inline(${p.ty})` : p.ty;
+    return `(${q(p.name)} = ${ty}, ${kinds[p.kind]}${p.description ? `, description = ${q(p.description)}` : ""}${p.attrs.map((a) => `, ${a}`).join("")}${p.explode === false ? ", explode = false" : ""})`;
+  });
   const responses = o.docResponses.map((r) => {
     const content = r.contents.length === 1
       ? r.contents[0].item

@@ -511,3 +511,41 @@ async fn the_default_reqwest_transport_returns_a_redirect_as_the_answer() {
         other => panic!("{other:?}"),
     }
 }
+
+#[cfg(not(no_document))]
+#[test]
+fn types_the_application_writes_are_schemas_of_the_document_through_their_own_to_schema() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "type_map").expect("the type-map probe has a document");
+    let schemas = document["components"]["schemas"].as_object().expect("schemas");
+    for name in ["Limits", "Bounds", "Color", "Minted"] {
+        assert!(schemas.contains_key(name), "{name} is a component: {:?}", schemas.keys().collect::<Vec<_>>());
+    }
+    // The emitter writes no type for a mapped name, so what the document says of it is the application's.
+    assert_eq!(schemas["Limits"]["type"], "object");
+}
+
+#[test]
+fn a_mapped_model_in_a_union_is_a_variant_named_by_its_type_not_its_path() {
+    use probes::type_map_direct_and_in_unions::types::Either;
+    let either = Either::Limits(probes::hand::Limits::default());
+    assert!(matches!(either, Either::Limits(_)));
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn a_mapped_model_used_directly_and_one_with_no_named_schema_are_in_the_document() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "type_map_direct_and_in_unions").expect("a document");
+    assert!(document["components"]["schemas"].as_object().expect("schemas").contains_key("Limits"));
+    // A declared mapped model nothing reaches is listed, and a mapped `std` type used as a body is written in place, with no component.
+    assert!(document["components"]["schemas"].as_object().expect("schemas").contains_key("Unused"));
+    // `inline` writes a type that has no `ToSchema` in place: no component, and the schema is its own.
+    assert!(document["components"]["schemas"]["Holder"]["properties"]["nullable"].to_string().contains("null"), "a nullable inline field says null: {}", document["components"]["schemas"]["Holder"]["properties"]["nullable"]);
+    assert!(!document["components"]["schemas"].as_object().expect("schemas").contains_key("Opaque"));
+    assert_eq!(document["components"]["schemas"]["Holder"]["properties"]["token"]["description"], "The access token.");
+    // A mapped scalar of another namespace that only a parameter names is a component all the same.
+    assert!(document["components"]["schemas"].as_object().expect("schemas").contains_key("Money"));
+    assert_eq!(document["paths"]["/s"]["post"]["requestBody"]["content"]["application/json"]["schema"]["type"], "string");
+    assert_eq!(document["paths"]["/d"]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/Limits");
+}

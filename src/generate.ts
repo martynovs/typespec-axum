@@ -4,7 +4,7 @@ import { isMetadata, type HttpService } from "@typespec/http";
 import { resolveInfo } from "@typespec/openapi";
 import { type Events, type Op, type Types, readOp } from "./contract.js";
 import { type Config, Refusal } from "./config.js";
-import { schemaDeps, schemaExpr } from "./schema.js";
+import { namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
 import { generatedNotice, isKeyword, q } from "./rust.js";
 import { manualSchema } from "./types/templates.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, operationModule } from "./server/templates.js";
@@ -57,7 +57,7 @@ const CRATES = new Set(["std", "core", "alloc", "axum", "utoipa", "serde", "serd
 function declared(program: Program, ns: Namespace, rust: (t: Type) => string, out: Set<string>) {
   if (getNamespaceFullName(ns).split(".")[0] === "TypeSpec") return; // the compiler's own, and its libraries'
   const plain = (t: any) => t.name && !t.templateMapper && !t.node?.templateParameters?.length;
-  const add = (t: Type) => { const n = rust(t); if (/^[A-Z]\w*$/.test(n)) out.add(n); };
+  const add = (t: Type) => { const n = rust(t); if (/^[A-Z]\w*$/.test(n) || n.includes("::")) out.add(n); };
   for (const m of ns.models.values()) if (plain(m) && ![...m.properties.values()].some((p) => isMetadata(program, p))) add(m);
   for (const e of ns.enums.values()) add(e);
   for (const u of ns.unions.values()) if (plain(u)) add(u);
@@ -120,17 +120,36 @@ export function generate(program: Program, config: Config, types: Types, service
 
     const schemas = new Set<string>();
     declared(program, svc.namespace, bare, schemas);
+    // `schemas` holds the types the emitter writes; one the application writes is a component by its own path, which utoipa reaches only through a type that holds it.
+    const componentPaths = new Set([...config.typeMap.values()].filter((e) => !e.inline).map((e) => e.path));
+    const mapped = [...schemas].filter((name) => componentPaths.has(name));
+    for (const name of [...schemas]) if (!types.known(name) && (name.includes("::") || name === "String")) schemas.delete(name);
     const ids = new Set<string>();
     const traits = new Set<string>();
     const mentionedNames = new Set<string>();
     // A type a parameter, body, answer or event names is a schema of the document even when the namespace does not declare it. The
     // operations a service shares from another are in its document too.
     const mention = (o: Op) => {
+      for (const p of config.document === "none" ? [] : o.docParams) {
+        for (const entry of config.typeMap.values()) {
+          if (onlyPartial(entry) && p.ty !== undefined && p.ty !== entry.path && namesPath(p.ty, entry.path)) throw new Refusal(`${module}: ${o.id} has the parameter ${p.name} of ${p.ty}, which holds ${entry.path}, a type-map entry with inline: true: utoipa takes whether a parameter is optional, and the element of a list, from ToSchema, so only a required parameter of the type itself is written`);
+        }
+      }
+      // utoipa asks for `ToSchema` of a body or an answer (a list's element too), which a type of `inline: true` has not: it is for fields and parameters.
+      for (const ty of config.document === "none" ? [] : [o.body, ...o.answers.map((a) => a.ty), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.ty)), ...(o.events?.variants.map((v) => v.ty) ?? [])]) {
+        for (const entry of config.typeMap.values()) {
+          if (onlyPartial(entry) && ty !== undefined && namesPath(ty, entry.path)) throw new Refusal(`${module}: ${o.id} has ${ty} as a body or an answer, which holds ${entry.path}, a type-map entry with inline: true: utoipa takes the schema of a body or an answer from ToSchema, so put it in a model`);
+        }
+      }
       const mentioned = [o.body, ...o.answers.map((a) => a.ty), ...o.docParams.map((p) => p.ty), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.ty)), ...(o.events?.variants.map((v) => v.ty) ?? [])];
       for (const ty of mentioned) {
-        for (const [, name] of (ty ?? "").matchAll(/(?:\w+::)*([A-Z]\w*)/g)) {
+        for (const [, name] of withoutPaths(ty ?? "", [...config.typeMap.values()].map((e) => e.path)).matchAll(/(?:\w+::)*([A-Z]\w*)/g)) {
           if (types.known(name)) mentionedNames.add(name);
           if (types.known(name) && !config.inlined.has(name)) schemas.add(name);
+        }
+        // A type the application writes that an operation names (a parameter, say, which utoipa does not collect) is a component too.
+        for (const entry of config.typeMap.values()) {
+          if (!entry.inline && namesPath(ty ?? "", entry.path) && !mapped.includes(entry.path)) mapped.push(entry.path);
         }
       }
     };
@@ -157,10 +176,28 @@ export function generate(program: Program, config: Config, types: Types, service
     // A type only a field that utoipa is told not to follow refers to would be missing from the document.
     const reached = types.closure([...schemas, ...mentionedNames]);
     for (const name of types.hidden()) if (reached.has(name)) schemas.add(name);
+    // A type the application writes that only a field of a type of this document holds is in it too.
+    for (const path of types.mappedHeld(reached)) if (!mapped.includes(path)) mapped.push(path);
     const unions = new Map<string, Events>();
     for (const o of ops) if (o.events) unions.set(o.events.name, o.events);
     for (const name of unions.keys()) {
       if (traits.has(name) || TRAITS.has(name)) throw new Refusal(`${module}: the stream ${name} takes the name of an operation's trait or of a type the generated code uses: rename one in the contract`);
+    }
+    // A document names a schema by the Rust ident, so a type the application writes (`type-map`) that this document holds may not share one
+    // with a type of it the emitter writes (a type of the contract, an event union, its item placeholder) or with another mapped type: one
+    // would replace the other in the components. A mapped type is listed once, whichever way its path starts (`::crate::x::L`, `crate::x::L`).
+    const listed = new Set<string>();
+    const components = mapped.filter((path) => !listed.has(path.replace(/^::/, "")) && listed.add(path.replace(/^::/, "")));
+    if (config.document !== "none") {
+      const held = new Set([...[...reached, ...schemas].filter((name) => types.known(name)), ...unions.keys(), ...[...unions.keys()].map((name) => `${name}Item`), ...[...config.inlined].filter((name) => !name.startsWith("="))]);
+      const owners = new Map<string, string>();
+      for (const path of components) {
+        const ident = path.slice(path.lastIndexOf(":") + 1);
+        const other = owners.get(ident);
+        if (other !== undefined) throw new Refusal(`type-map: ${other} and ${path} are both named ${ident}: the document holds one schema for a name, so rename one of them`);
+        owners.set(ident, path);
+        if (held.has(ident)) throw new Refusal(`type-map: ${path} is named ${ident}, which is also a type the emitter writes into the same document: it holds one schema for a name, so rename one of them`);
+      }
     }
     const extensions = [...config.extensionExpr.values()].map((expr) => {
       const has = new Set(ops.filter((o) => o.extensions.some((e) => e.name === expr.name)).map((o) => o.id));
@@ -200,7 +237,7 @@ export function generate(program: Program, config: Config, types: Types, service
       info,
       paths: [...ops.map((o) => `${o.id}::run`), ...shared],
       // Every type the namespace declares is a schema, reachable or not (`omit-unreachable-types: false`), and so is each event item.
-      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...unions.keys()],
+      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components, ...unions.keys()],
       items: [...schemaOf].map(([name, s]) => `(${q(name + "Item")}, ${s.fn}())`),
       operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [

@@ -1,0 +1,3 @@
+type-map.Token.path=crate::hand::Opaque
+type-map.Token.inline=true
+type-map.Token.eq=true

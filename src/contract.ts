@@ -95,6 +95,8 @@ export interface Types {
   hidden: () => ReadonlySet<string>;
   /** Every type `roots` are made of. */
   closure: (roots: Iterable<string>) => Set<string>;
+  /** The mapped types that are components which the given defined types hold in their fields. */
+  mappedHeld: (names: Iterable<string>) => string[];
 }
 
 /** The tags of an operation: those of the interfaces and namespaces it sits in, outermost first, and its own. */

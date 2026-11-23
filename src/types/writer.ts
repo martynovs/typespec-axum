@@ -3,8 +3,8 @@ import { getDoc, getEncode, getNamespaceFullName, getSummary, getExamples, seria
 import { type Config, Refusal } from "../config.js";
 import { constraintValues, constraints, facts } from "../constraints.js";
 import { constPrefix, isKeyword, jsonText, q, rustField, rustJson } from "../rust.js";
-import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, literalSchemaFn, manualSchema, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
-import { schemaDeps, schemaExpr } from "../schema.js";
+import { type EnumMember, type StructField, constantsImpl, containerNewtype, eqMarker, literalSchemaFn, manualSchema, partialSchemaFn, numericEnum, scalarNewtype, stringEnum, structDef, untaggedUnion } from "./templates.js";
+import { inlineKey, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "../schema.js";
 import { pascalIdent, uniqueNames } from "../rust.js";
 
 
@@ -240,13 +240,24 @@ export class TypeWriter {
   /** Union types with a `null` variant: `null` is one of their values, and an `Option` of them would swallow it. */
   private readonly nullables = new Set<string>();
 
+  /** The mapped types (`type-map`) that are components, which the given defined types hold in their fields. */
+  mappedHeld(names: Iterable<string>): string[] {
+    const out = new Set<string>();
+    for (const name of names) {
+      for (const part of this.parts.get(name) ?? []) {
+        for (const entry of this.config.typeMap.values()) if (!entry.inline && namesPath(part, entry.path)) out.add(entry.path);
+      }
+    }
+    return [...out];
+  }
+
   /** Every defined type `roots` are made of, however deep, and the roots themselves. */
   closure(roots: Iterable<string>): Set<string> {
     const out = new Set<string>();
     const visit = (name: string) => {
       if (out.has(name)) return;
       out.add(name);
-      for (const part of this.parts.get(name) ?? []) for (const inner of part.match(/\b[A-Z]\w*\b/g) ?? []) visit(inner);
+      for (const part of this.parts.get(name) ?? []) for (const inner of withoutPaths(part, [...this.config.typeMap.values()].map((e) => e.path)).match(/\b[A-Z]\w*\b/g) ?? []) visit(inner);
     };
     for (const root of roots) visit(root);
     return out;
@@ -294,6 +305,8 @@ export class TypeWriter {
     }
     if (t.kind === "Union") throw new Refusal(`type-map: ${full} is a union, which is flattened into the types that use it: map a model, an enum or a scalar`);
     this.mappedKeys.add(key);
+    // One that names no schema of the document (`u128`, a `std` type) is written in place in a hand-written schema.
+    if (entry.inline) this.config.inlined.add(inlineKey(entry.path));
     // A mapped scalar is written as text where one is needed (a `text/plain` body): it is taken to be `Display`.
     if (t.kind === "Scalar") this.scalars.add(entry.path.slice(entry.path.lastIndexOf(":") + 1));
     return entry.path;
@@ -464,6 +477,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       if (getEncode(this.program, t)) throw new Refusal(`${name}: @encode is not generated: the wire type would differ from the Rust type`);
       this.scalars.add(name);
       const base = t.baseScalar ? this.rust(t.baseScalar) : "String";
+      if (this.documenting && [...this.config.typeMap.values()].some((e) => onlyPartial(e) && base === e.path)) throw new Refusal(`${name}: a scalar that extends ${base}, a type-map entry with inline: true, is a newtype that derives ToSchema over it, which it has not: map ${name} too`);
       this.parts.set(name, [base]);
       const root = this.rootOf(t);
       // A derive cannot write a constraint on a newtype's field, so a constrained scalar takes a schema written by hand.
@@ -611,7 +625,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         doc: this.doc(t),
         name,
         variants: variants.map(([k, v], i) => ({
-          name: names(typeof k === "string" ? pascalIdent(k) : types[i] === "()" ? "Null" : pascalIdent(types[i].replace(/\W+/g, " ")) || "Value"),
+          name: names(typeof k === "string" ? pascalIdent(k) : types[i] === "()" ? "Null" : pascalIdent(types[i].replace(/(?<![\w:])(?:::)?(?!(?:std|core|alloc|serde_json|serde|axum|utoipa)::)[a-z_]\w*::(?:[a-z_]\w*::)*/g, "").replace(/\W+/g, " ")) || "Value"),
           ty: held[i],
         })),
       });
@@ -658,6 +672,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         this.parts.set(name, [inner]);
         // A derive cannot be told not to follow the type inside a newtype, so one that holds itself has its schema written by hand.
         const recursive = this.reachesInProgress(inner) || inner.includes("serde_json::Value");
+        if (this.documenting && [...this.config.typeMap.values()].some((e) => onlyPartial(e) && namesPath(inner, e.path))) throw new Refusal(`${name}: a list or a map of a type-map entry with inline: true is a newtype that derives ToSchema over it, which it has not: put it in a model, or map ${name} too`);
         const code = containerNewtype({ doc: this.doc(t), name, inner, schema: !recursive && this.documenting }) + constantsImpl(name, facts(this.program, t, name));
         if (!recursive) return code;
         const description = getDoc(this.program, t);
@@ -840,14 +855,20 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     // So is a union nothing names (`string | int32`), which has a Rust type of its own only because Rust needs one.
     // Not when the field refers back to what it is part of: written in place it would never end.
     const instance = !inProgress && ((p.type.kind === "Model" && this.isInstance(p.type)) || (p.type.kind === "Union" && !p.type.name && /^Anon\d+$/.test(plain)));
+    const inlineMapped = [...this.config.typeMap.values()].some((e) => onlyPartial(e) && namesPath(plain, e.path));
+    // utoipa asks for `ToSchema` of what a field holds (`value_type`, the element of a `Vec`), which an inline type has not: the field takes its schema from a function.
+    if (this.documenting && inlineMapped && (constraints(this.program, p).length || this.exampleList(p).length)) throw new Refusal(`${owner}.${p.name}: a field of a type-map entry with inline: true takes no constraint or example: they have no way to reach the schema the application writes`);
+    const viaFn = this.documenting && inlineMapped ? this.partialSchemaFn(owner, p, schemaExpr(plain, this.config.inlined)) : undefined;
     const written = [
       ...(inProgress ? ["no_recursion"] : []),
+      // A mapped type the entry says is written in place (`inline`), though its path looks like a component (`uuid::Uuid`), is read from its own `PartialSchema`.
       ...(instance ? ["inline"] : []),
+      ...(viaFn ? [`schema_with = ${viaFn}`, ...(plainOptional || doubled ? ["required = false"] : [])] : []),
       ...(open ? ["value_type = Object"] : []),
       ...(literal ? [`schema_with = ${literal}`] : []),
       ...(!p.optional && optional.startsWith("Option<") ? ["required = true"] : []),
-      ...(plainOptional ? [`value_type = ${plain}`, "required = false"] : []),
-      ...(doubled ? [`value_type = ${ty.replace(/Box<([^<>]*)>/g, "$1")}`, "required = false"] : []),
+      ...(plainOptional && !viaFn ? [`value_type = ${plain}`, "required = false"] : []),
+      ...(doubled && !viaFn ? [`value_type = ${ty.replace(/Box<([^<>]*)>/g, "$1")}`, "required = false"] : []),
       ...(p.defaultValue ? [`default = json!(${rustJson(serializeValueAsJson(this.program, p.defaultValue, p.type))})`] : []),
     ];
     // utoipa writes a `serde_json::Value` as an empty schema, which it cannot read back: say it is an object, as everywhere else it is written.
@@ -919,6 +940,13 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
   /** A property typed `null` (a `()`) is `type: null` in the TypeSpec document; a derive writes `default: null`. */
   private nullSchema(owner: string, property: ModelProperty): string | undefined {
     return isNull(property.type) ? this.schemaFn(owner, property, { type: "null" }) : undefined;
+  }
+
+  /** The function that gives a field the schema of its type's own `PartialSchema`. Returns its name. */
+  private partialSchemaFn(owner: string, property: ModelProperty, schema: string): string {
+    const name = this.fnName("schema", owner, property);
+    this.alias(`fn ${name}`, () => partialSchemaFn(name, schema, getDoc(this.program, property)));
+    return name;
   }
 
   /** The function that gives a field the schema `body`, with the field's own doc as its description. Returns its name. */

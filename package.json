@@ -1,6 +1,6 @@
 {
   "name": "@martynovs/typespec-rust-api",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A TypeSpec emitter that writes the Rust of an API from its contract: serde wire types, an axum server, an HTTP client, an irpc protocol and the OpenAPI document.",
   "keywords": [
     "typespec",

@@ -1,6 +1,7 @@
 /** The options of the emitter: what they are, how they are written in `tspconfig.yaml`, and the check that turns them into a `Config`. */
 import type { JSONSchemaType } from "@typespec/compiler";
 import type { Config, ExtensionExpr, TypeMapEntry } from "./config.js";
+import { inlineSchema } from "./schema.js";
 import { isKeyword } from "./rust.js";
 
 export interface EmitterOptions {
@@ -38,9 +39,9 @@ export interface EmitterOptions {
   "require-json-content-type"?: boolean;
   /**
    * Types the contract names that the application writes itself: the contract's name (`Name`, or `Namespace::Name` when types of that name are in
-   * more than one namespace) to the Rust path, or `{ path, eq }`. The emitter writes no type for it; every reference names the path.
+   * more than one namespace) to the Rust path, or `{ path, eq, inline }`. The emitter writes no type for it; every reference names the path.
    */
-  "type-map"?: Record<string, string | { path: string; eq?: boolean }>;
+  "type-map"?: Record<string, string | { path: string; eq?: boolean; inline?: boolean }>;
   /**
    * Extensions of an operation the application reads at compile time: an extension's name (`x-guard`) to the macro that makes a value
    * of its JSON (`macro!({"scope": "read"})`), the type of that value, the name of the constant each operation's module holds it
@@ -70,11 +71,11 @@ const extensionExprSchema = {
 const typeMapSchema = {
   type: "object",
   nullable: true,
-  description: "Types the application writes itself: the contract's name to a Rust path, or to { path, eq }.",
+  description: "Types the application writes itself: the contract's name to a Rust path, or to { path, eq, inline }.",
   additionalProperties: {
     anyOf: [
       { type: "string" },
-      { type: "object", properties: { path: { type: "string" }, eq: { type: "boolean", nullable: true } }, required: ["path"], additionalProperties: false },
+      { type: "object", properties: { path: { type: "string" }, eq: { type: "boolean", nullable: true }, inline: { type: "boolean", nullable: true } }, required: ["path"], additionalProperties: false },
     ],
   },
 };
@@ -96,7 +97,7 @@ export const options: JSONSchemaType<EmitterOptions> = {
     "max-query-bytes": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The longest query string a generated handler parses (at most what a 32-bit `usize` holds).", default: 4096 },
     "max-json-depth": { type: "integer", nullable: true, minimum: 1, maximum: 128, description: "How deep a JSON request body may nest before it is parsed (serde_json itself stops at 128).", default: 32 },
     "max-query-pairs": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The most pairs a generated handler parses (at most what a 32-bit `usize` holds).", default: 64 },
-    document: { type: "string", enum: ["derived", "typespec", "none"], nullable: true, description: "How exact to `@typespec/openapi3` the document is, or `none` for no document and no utoipa.", default: "derived" },
+    document: { type: "string", enum: ["derived", "typespec", "none"], nullable: true, description: "How exact to `@typespec/openapi3` the document is, or `none` for no document and no utoipa. With a `type-map`, each mapped type must implement `utoipa::ToSchema` (a type that has only a `PartialSchema`, such as `uuid::Uuid`: `inline: true` in its entry), which rustc checks, not the emitter.", default: "derived" },
     "require-json-content-type": { type: "boolean", nullable: true, description: "Whether a JSON body needs a JSON Content-Type.", default: true },
     "type-map": typeMapSchema as never,
     "extension-expr": extensionExprSchema as never,
@@ -139,7 +140,11 @@ function readTypeMap(raw: EmitterOptions["type-map"]): { map: Map<string, TypeMa
     const path = typeof value === "string" ? value : value.path;
     // A type of the standard library that is `Eq` needs no word of the entry.
     const eq = (typeof value === "object" ? value.eq : undefined) ?? /^(std::string::)?(String|bool|char|[iu](8|16|32|64|128|size))$/.test(path);
-    const entry = { path, eq };
+    // With a document, a path that names no schema (a primitive, `String`, a `std` or generic type) is written in place; `inline` says so of any other (`uuid::Uuid`).
+    const said = typeof value === "object" ? value.inline : undefined;
+    if (said === false && inlineSchema(path)) return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(path)}, which names no schema of the document (a primitive, String, a std or generic type): it is written in place, so it takes no inline: false` };
+    const inline = said ?? inlineSchema(path);
+    const entry = { path, eq, inline };
     if (!RUST_PATH.test(entry.path) || /^(super|self)\b/.test(entry.path)) {
       return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(entry.path)}, which is not a Rust path from the crate (\`crate::...\`, \`std::...\` or a dependency's); \`super::\` and \`self::\` are refused, the modules sit at different depths` };
     }
@@ -168,7 +173,6 @@ export function resolveConfig(o: EmitterOptions, generator: string): { config: C
   const document = o.document ?? (o.server === false ? "none" : "derived");
   const typeMap = readTypeMap(o["type-map"]);
   if (typeMap.error) return { error: typeMap.error };
-  if (typeMap.map.size > 0 && document !== "none") return { error: "type-map needs document: none: a type the application writes has no schema for the document" };
   const expr = readExtensionExpr(o["extension-expr"]);
   if (expr.error) return { error: expr.error };
   return {

@@ -1,1 +1,1 @@
-type-map.Probe::Wire::Limits.path=crate::hand::Limits
+type-map.Probe::Wire::Limits.path=crate::hand::WireLimits

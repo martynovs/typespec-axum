@@ -223,7 +223,7 @@ contracts/
   common/main.tsp          @service namespace Shop.Common   the models both share
   common/tspconfig.yaml    server: false                     -> generated/common/types.rs
   web/main.tsp             @service namespace Shop.Web       import "../common/main.tsp"
-  web/tspconfig.yaml       document: none, type-map          -> types.rs, axum.rs
+  web/tspconfig.yaml       document: none, type-map          -> types.rs, axum.rs   (a `type-map` also works with a document: see its row)
   rpc/main.tsp             @service namespace Shop.Rpc       import "../common/main.tsp"
   rpc/tspconfig.yaml       server: false, client, irpc       -> types.rs, client.rs, irpc.rs
 ```
@@ -256,8 +256,8 @@ tsp compile contracts/common && tsp compile contracts/web && tsp compile contrac
 #[path = "../generated/rpc"]    pub mod rpc    { pub mod types; pub mod client; #[path = "irpc.rs"] pub mod irpc_api; }
 ```
 
-Without the `common` project each contract writes its own `Item` (two types of one shape in two modules), which is fine when they share nothing. `type-map` needs
-`document: none`, and the types it names must derive `Debug`, `Clone`, `PartialEq`, `Serialize` and `Deserialize`, as the generated ones do. An `@service` with no
+Without the `common` project each contract writes its own `Item` (two types of one shape in two modules), which is fine when they share nothing. `type-map` with a document (`derived` or `typespec`) needs
+`utoipa::ToSchema` on the types it names (their schema is the application's, and a derive writes it), and they must derive `Debug`, `Clone`, `PartialEq`, `Serialize` and `Deserialize`, as the generated ones do. An `@service` with no
 operations (`common`) writes the types its namespace declares. The `rpc` service implements the client's `Api` and is served with `irpc_api::shop_rpc::spawn`; the
 `web` service implements the axum handler traits; both answer with the same `common::types::Item`.
 
@@ -332,7 +332,7 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 | `client-path` | `crate::client` | Where `client.rs` is, for `irpc.rs`. |
 | `client-max-body-bytes` | `16777216` | With `client`: the most of a response body (or of one line of an event stream) it reads; more is an error. |
 | `client-reqwest` | `false` | With `client`: a `Reqwest` transport in `client.rs`. |
-| `type-map` | none | Types the application writes itself: a map from the contract's name (`Bounds`, or `Shop::Wire::Bounds`, the namespace in front with `::` (an option's name cannot hold a dot), when more than one namespace has a type of that name: a bare name that is ambiguous is an error) to a Rust path (`crate::wire::Bounds`), or to `{ path, eq }`. The emitter writes no type for it and every reference names the path. For a model, an enum or a scalar (`Instant: String`; a mapped scalar is taken to be `Display`, and a scalar that extends it is `Eq` as its entry says, with no `Hash`); not a union, which is flattened, and not a template. Needs `document: none`: a type the emitter did not write has no schema. An optional field of a mapped type is a plain `Option` of it. A name no type of the contract has is an error. |
+| `type-map` | none | Types the application writes itself: a map from the contract's name (`Bounds`, or `Shop::Wire::Bounds`, the namespace in front with `::` (an option's name cannot hold a dot), when more than one namespace has a type of that name: a bare name that is ambiguous is an error) to a Rust path (`crate::wire::Bounds`), or to `{ path, eq, inline }`. The emitter writes no type for it and every reference names the path. For a model, an enum or a scalar (`Instant: String`; a mapped scalar is taken to be `Display`, and a scalar that extends it is `Eq` as its entry says, with no `Hash`); not a union, which is flattened, and not a template. With a document (`derived` or `typespec`) each must implement `utoipa::ToSchema` (and `PartialSchema`; a derive writes both): the emitter writes no schema for it, so what the document says of it is the application's, and the document matches `@typespec/openapi3` only as far as the application's schema does. The document names a schema by the type's Rust name (so a mapped type may not share a name with a type the emitter writes, which is refused, and `#[schema(as = ..)]` is not followed), and a type of another crate cannot implement `ToSchema` for you: give the entry `inline: true` when the type has a `PartialSchema` (utoipa gives one to `uuid::Uuid` and the `chrono` and `time` types with its features: the schema is then written in place, in a field and in a body, with no component). `inline` is for a field (in a model, a list or optional) and for a required parameter; a body, an answer, an optional or list parameter, a field with a constraint or example, and a named list or scalar over it are refused, since utoipa asks `ToSchema` of them. Or wrap it in a type of your own (`#[serde(transparent)]`) and map that. A path that names no component (a primitive, `String`, a `std` type, a generic type) is written in place from its own `PartialSchema`, which it must implement (utoipa does for the primitives, `String`, `Vec`, maps, `Option` and `Box`; not for `IpAddr`, `Duration` or a `PathBuf`: wrap those); any other path is a component and needs `ToSchema`. A mapped model in an untagged union is the variant named by its type (`Limits`), not its path. With `document: none` no utoipa is used. An optional field of a mapped type is a plain `Option` of it. A name no type of the contract has is an error. |
 | `extension-expr` | none | Extensions of an operation the application reads at compile time: an extension's name (`x-guard`) to `{ macro, type, const, accessor, required }`. Each operation that states it gets `pub const <const>: <type> = <macro>!(<its JSON>);` in its module, and `Operation` a `const fn <accessor>(&self)` returning a reference to it (`Option<&'static T>`, or `&'static T` when `required`: an operation without it fails the emit). The macro is yours: it matches the JSON as tokens (`"none"`, `{"scope": "read"}`), and a value it does not accept stops your build at that token. `Route::extensions` still carries the raw JSON. |
 | `require-json-content-type` | `true` | A JSON body is read only from a request whose `Content-Type` is `application/json` or `+json` (else `415`), as axum's `Json` does. |
 | `untyped-responses` | `forbid` | `allow` types a response with no named shape as `serde_json::Value` instead of failing the emit. |
@@ -396,6 +396,15 @@ just serve      # run the example
 ```
 
 `examples/pets/generated` is committed so a change to the emitter shows what it does to the output.
+
+## Changes
+
+**0.3.0**
+- `type-map` works with a document (`derived` or `typespec`): each mapped type implements `utoipa::ToSchema`, or has `inline: true` and a `PartialSchema`.
+- **Breaking:** a type of the `type-map` that is a member of an untagged union is the variant named by its type (`Limits`), where it was named by its whole path (`CrateHandLimits`).
+
+**0.2.1**
+- A body that does not decode is refused with the first of `400`, `422`, `401` the operation lists as a JSON answer; a refusal with no body or a `text/plain` one is not counted.
 
 ## License
 
