@@ -171,7 +171,7 @@ fn missing_segment() -> AxResponse {
 
 ${c.document === "none" ? "" : `/// What utoipa cannot say, applied to the document it built: OpenAPI 3.2, no license, and the stream item schemas written in place
 /// of their placeholder components.
-fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)]) {
+fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)], exact: &[(&str, &str)], shapes: &[(&str, &str, &str, &str)]) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document.get_mut("info").and_then(serde_json::Value::as_object_mut) {
         info.remove("license");
@@ -223,7 +223,67 @@ fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)],
             schemas.remove(*name);
         }
     }
-    if let Some(schemas) = document.pointer_mut("/components/schemas") {
+    // What utoipa cannot hold (a const) is written into the document as it is.
+    for (name, schema) in exact {
+        if let Some(held) = document.pointer_mut("/components/schemas").and_then(serde_json::Value::as_object_mut).and_then(|schemas| schemas.get_mut(*name)) {
+            *held = serde_json::from_str(schema).expect("the exact schema is JSON");
+        }
+    }
+    // What utoipa writes otherwise than the TypeSpec document does: the exact format of a parameter (uint32), and whether a response header is required or a list.
+    for (operation_id, place, name, shape) in shapes {
+        let paths = document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten();
+        for (_, path) in paths {
+            for (_, operation) in path.as_object_mut().into_iter().flatten() {
+                if operation.get("operationId").and_then(serde_json::Value::as_str) != Some(operation_id) {
+                    continue;
+                }
+                if *place == "parameter" || *place == "parameter-items" {
+                    // name is where the parameter is and what it is called: query:id.
+                    let (location, called) = name.split_once(':').unwrap_or(("", name));
+                    for parameter in operation.get_mut("parameters").and_then(serde_json::Value::as_array_mut).into_iter().flatten() {
+                        if parameter.get("name").and_then(serde_json::Value::as_str) == Some(called) && parameter.get("in").and_then(serde_json::Value::as_str) == Some(location) {
+                            if *place == "parameter" {
+                                parameter["schema"]["format"] = json!(shape);
+                            } else {
+                                parameter["schema"]["items"]["format"] = json!(shape);
+                            }
+                        }
+                    }
+                } else {
+                    // place is the status of the response: shape is required, optional, required-list or optional-list.
+                    let header = operation.pointer_mut(&format!("/responses/{place}/headers/{name}"));
+                    if let Some(header) = header.and_then(serde_json::Value::as_object_mut) {
+                        header.insert("required".to_owned(), json!(!shape.starts_with("optional")));
+                        if shape.ends_with("-list") {
+                            header.insert("schema".to_owned(), json!({"type": "array", "items": {"type": "string"}}));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A parameter that may be null: the TypeSpec document writes anyOf of the type and null, where utoipa writes a list of types.
+${c.document === "typespec" ? `    let paths = document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten();
+    for (_, path) in paths {
+        for (_, operation) in path.as_object_mut().into_iter().flatten() {
+            for parameter in operation.get_mut("parameters").and_then(serde_json::Value::as_array_mut).into_iter().flatten() {
+                let Some(schema) = parameter.get_mut("schema").and_then(serde_json::Value::as_object_mut) else { continue };
+                let Some(kinds) = schema.get("type").and_then(serde_json::Value::as_array).cloned() else { continue };
+                if kinds.len() != 2 || !kinds.contains(&json!("null")) {
+                    continue;
+                }
+                let kind = kinds.iter().find(|k| **k != json!("null")).cloned().unwrap_or(json!("null"));
+                let mut member = serde_json::Map::new();
+                member.insert("type".to_owned(), kind);
+                if let Some(format) = schema.remove("format") {
+                    member.insert("format".to_owned(), format);
+                }
+                schema.remove("type");
+                schema.insert("anyOf".to_owned(), json!([member, {"type": "null"}]));
+            }
+        }
+    }
+` : ""}    if let Some(schemas) = document.pointer_mut("/components/schemas") {
         examples_as_list(schemas);
     }
 }
@@ -575,6 +635,10 @@ export const contractModule = (c: {
   paths: string[];
   components: string[];
   items: string[];
+  /** The components written into the finished document as they are, as `(name, json)`. */
+  exact: string[];
+  /** What utoipa writes otherwise than the TypeSpec document: `(operationId, place, name, shape)` of a parameter format or a response header. */
+  shapes: string[];
   /** `(operationId, &[tags], deprecated, whether the body is required)` of each operation. */
   operations: string[];
   body: string[];
@@ -630,7 +694,7 @@ ${c.documented ? `
     /// The OpenAPI document of this contract, as the TypeSpec emitter writes it.
     pub fn document() -> serde_json::Value {
         let mut document = serde_json::to_value(<ApiDoc as utoipa::OpenApi>::openapi()).expect("the document serializes");
-        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}]);
+        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}], &[${c.exact.join(", ")}], &[${c.shapes.join(", ")}]);
         document
     }` : ""}
 }`;

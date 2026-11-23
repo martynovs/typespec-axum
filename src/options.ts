@@ -35,6 +35,8 @@ export interface EmitterOptions {
   "untyped-responses"?: "forbid" | "allow";
   /** `derived` (default): the document utoipa's derives write. `typespec`: schemas written by hand to match `@typespec/openapi3` exactly. `none`: no document, and the generated code does not use utoipa. */
   document?: "derived" | "typespec" | "none";
+  /** With `document: typespec`, how an enum is written, as the option of `@typespec/openapi3` of this name: `default` (one `enum`), or `annotated` (a `oneOf` of `const` members, with their `@summary` and `@doc`). */
+  "enum-strategy"?: "default" | "annotated";
   /** Whether a JSON body is read only from a request whose `Content-Type` is JSON. Default `true`. */
   "require-json-content-type"?: boolean;
   /**
@@ -97,6 +99,7 @@ export const options: JSONSchemaType<EmitterOptions> = {
     "max-query-bytes": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The longest query string a generated handler parses (at most what a 32-bit `usize` holds).", default: 4096 },
     "max-json-depth": { type: "integer", nullable: true, minimum: 1, maximum: 128, description: "How deep a JSON request body may nest before it is parsed (serde_json itself stops at 128).", default: 32 },
     "max-query-pairs": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The most pairs a generated handler parses (at most what a 32-bit `usize` holds).", default: 64 },
+    "enum-strategy": { type: "string", enum: ["default", "annotated"], nullable: true, description: "With `document: typespec`, how an enum is written, as `@typespec/openapi3`'s option of this name.", default: "default" },
     document: { type: "string", enum: ["derived", "typespec", "none"], nullable: true, description: "How exact to `@typespec/openapi3` the document is, or `none` for no document and no utoipa. With a `type-map`, each mapped type must implement `utoipa::ToSchema` (a type that has only a `PartialSchema`, such as `uuid::Uuid`: `inline: true` in its entry), which rustc checks, not the emitter.", default: "derived" },
     "require-json-content-type": { type: "boolean", nullable: true, description: "Whether a JSON body needs a JSON Content-Type.", default: true },
     "type-map": typeMapSchema as never,
@@ -145,9 +148,10 @@ function readTypeMap(raw: EmitterOptions["type-map"]): { map: Map<string, TypeMa
     if (said === false && inlineSchema(path)) return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(path)}, which names no schema of the document (a primitive, String, a std or generic type): it is written in place, so it takes no inline: false` };
     const inline = said ?? inlineSchema(path);
     const contract = (typeof value === "object" ? value.schema : undefined) === "contract";
-    if (contract && inlineSchema(path)) return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(path)}, which names no schema of the document (a primitive, String, a std or generic type): schema: contract is for a model, an enum or a scalar of another crate` };
+    // `schema: contract` on a primitive (`Instant: String`) keeps the primitive as the type and gives the document the scalar's own component.
+    const scalar = contract && inlineSchema(path);
     if (contract && said !== undefined) return { map, error: `type-map: ${name} says both schema: contract and inline: the schema is the contract's, or the type's own PartialSchema, not both` };
-    const entry = { path, eq, inline: contract ? false : inline, contract, partialEq: (typeof value === "object" ? value["partial-eq"] : undefined) ?? true };
+    const entry = { path, eq, inline: scalar ? true : contract ? false : inline, contract: contract && !scalar, scalar, partialEq: (typeof value === "object" ? value["partial-eq"] : undefined) ?? true };
     if (!RUST_PATH.test(entry.path) || /^(super|self)\b/.test(entry.path)) {
       return { map, error: `type-map: ${name} is mapped to ${JSON.stringify(entry.path)}, which is not a Rust path from the crate (\`crate::...\`, \`std::...\` or a dependency's); \`super::\` and \`self::\` are refused, the modules sit at different depths` };
     }
@@ -174,6 +178,7 @@ export function resolveConfig(o: EmitterOptions, generator: string): { config: C
   }
   if (o.irpc && !o.client) return { error: "irpc needs client: the protocol is served from and called through the client's Api" };
   const document = o.document ?? (o.server === false ? "none" : "derived");
+  if (o["enum-strategy"] === "annotated" && document !== "typespec") return { error: "enum-strategy: annotated is for document: typespec, which writes the enums of the document by hand" };
   const typeMap = readTypeMap(o["type-map"]);
   if (typeMap.error) return { error: typeMap.error };
   const expr = readExtensionExpr(o["extension-expr"]);
@@ -196,10 +201,12 @@ export function resolveConfig(o: EmitterOptions, generator: string): { config: C
       maxJsonDepth: o["max-json-depth"] ?? 32,
       allowUntyped: o["untyped-responses"] === "allow",
       document,
+      enumStrategy: o["enum-strategy"] ?? "default",
       requireJson: o["require-json-content-type"] ?? true,
       typeMap: typeMap.map,
       extensionExpr: expr.map,
       inlined: new Set(),
+      exact: new Map(),
     },
   };
 }

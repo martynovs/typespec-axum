@@ -1,2 +1,0 @@
-type-map.Stamp.path=String
-type-map.Stamp.schema=contract

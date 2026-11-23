@@ -662,3 +662,41 @@ fn a_template_that_holds_itself_or_is_held_by_its_own_argument_ends() {
     assert_eq!(answer["properties"]["data"]["$ref"], "#/components/schemas/Held", "{answer}");
     assert_eq!(schemas["LoopOfstring"]["properties"]["other"]["$ref"], "#/components/schemas/LoopOfstring", "{}", schemas["LoopOfstring"]);
 }
+
+#[cfg(not(no_document))]
+#[test]
+fn a_scalar_the_application_writes_as_a_string_keeps_its_component() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "type_map_scalar_schema").expect("a document");
+    let schemas = &document["components"]["schemas"];
+    // The component is the scalar's, with its doc: in every document mode.
+    assert_eq!(schemas["Instant"]["type"], "string", "{}", schemas["Instant"]);
+    assert_eq!(schemas["Instant"]["description"], "An instant on the wire.");
+    // The fields refer to it where the document is written to the letter.
+    let row = &schemas["Row"]["properties"];
+    if row["at"]["$ref"].is_null() {
+        // `derived` leaves a field to the derive: a string.
+        assert_eq!(row["at"]["type"], "string");
+    } else {
+        assert_eq!(row["at"]["$ref"], "#/components/schemas/Instant");
+        assert_eq!(row["maybe"]["anyOf"][0]["$ref"], "#/components/schemas/Instant", "{}", row["maybe"]);
+        assert_eq!(row["maybe"]["anyOf"][1]["type"], "null");
+        assert_eq!(row["many"]["items"]["$ref"], "#/components/schemas/Instant", "{}", row["many"]);
+        assert_eq!(row["plain"]["type"], "string");
+    }
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn an_unsigned_parameter_has_its_format_where_it_is_and_on_its_items() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "type_map_scalar_schema").expect("a document");
+    let parameters = document["paths"]["/r"]["get"]["parameters"].as_array().expect("parameters");
+    let find = |location: &str, name: &str| parameters.iter().find(|p| p["in"] == location && p["name"] == name).expect("a parameter").clone();
+    // Only in a document written to the letter: `derived` leaves a parameter to utoipa.
+    if find("query", "count")["schema"]["format"] == "uint32" {
+        assert_eq!(find("query", "ids")["schema"]["items"]["format"], "uint32", "{}", find("query", "ids"));
+        assert!(find("query", "ids")["schema"]["format"].is_null(), "the format is the items', not the list's");
+        assert!(find("header", "x-count")["schema"]["format"].is_null(), "a string header has no unsigned format");
+    }
+}

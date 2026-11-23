@@ -313,6 +313,7 @@ export class TypeWriter {
     // One that names no schema of the document (`u128`, a `std` type) is written in place in a hand-written schema.
     if (entry.inline) this.config.inlined.add(inlineKey(entry.path));
     // One whose schema is the contract's is told by a type of the generated code that implements what utoipa asks.
+    if (entry.scalar && this.documenting) this.contractScalar(t, entry.path);
     if (entry.contract && this.documenting) {
       this.config.inlined.add(schemaTypeKey(entry.path, contractSchemaName(entry.path), lastSegment(entry.path)));
       this.contractSchema(t, entry);
@@ -320,6 +321,28 @@ export class TypeWriter {
     // A mapped scalar is written as text where one is needed (a `text/plain` body): it is taken to be `Display`.
     if (t.kind === "Scalar") this.scalars.add(entry.path.slice(entry.path.lastIndexOf(":") + 1));
     return entry.path;
+  }
+
+  /** The scalars mapped to a primitive with `schema: contract`: the type of the generated code that says the schema of each, and its component. */
+  private readonly contractScalars = new Map<Type, { struct: string; name: string }>();
+
+  /** The types that say the schema of the scalars mapped to a primitive with `schema: contract`: each is a component of the document. */
+  contractScalarStructs(): string[] {
+    return [...this.contractScalars.values()].map((s) => s.struct);
+  }
+
+  /** A scalar of the contract the application writes as a primitive (`Instant` as a `String`) keeps its own component in the document, and fields of it refer to it. */
+  private contractScalar(t: Type, path: string): void {
+    if (t.kind !== "Scalar") throw new Refusal(`type-map: ${path} is mapped with schema: contract, which for a primitive takes a scalar of the contract`);
+    if (this.contractScalars.has(t)) return;
+    const name = ident(t.name);
+    const struct = `${name}Schema`;
+    this.contractScalars.set(t, { struct, name });
+    const written = this.define(struct, `contract-scalar:${this.identity(t)}`, undefined, (struct) => {
+      const { schema, deps } = this.schemaOf(t, path);
+      return `/// The schema of the scalar \`${name}\` in the document: the application writes it as \`${path}\`.\npub struct ${struct};\n${manualSchema(struct, schema, deps, name)}`;
+    });
+    if (written !== struct) throw new Refusal(`type-map: ${name} is mapped with schema: contract, so its schema type is ${struct}, which is also a type of the contract: rename one in the contract`);
   }
 
   /**
@@ -359,7 +382,7 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
     const stated = (schema: string, target: Type) => {
       const values = extras(target);
       return Object.keys(values).length
-        ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
+        ? `{ let value = ${schema}; let mut value = if value.get("$ref").is_some() && ${Object.keys(values).some((k) => k !== "description")} { json!({"allOf": [value]}) } else { value }; if let Some(object) = value.as_object_mut() { object.extend(json!(${rustJson(values)}).as_object().cloned().unwrap_or_default()); } value }`
         : schema;
     };
     /** The schema of a literal type, or of a union of literals (and `null`), as the contract states it. */
@@ -459,7 +482,9 @@ ${manualSchema(name, schema, deps, lastSegment(entry.path))}`;
   /** `#[schema(..)]` for a property: its constraints and example. */
   schemaAttr(p: Type, extra: string[] = []): string {
     if (!this.documenting || this.writingGeneric) return "";
-    const c = [...extra, ...constraints(this.program, p), ...this.exampleList(p)];
+    // A field that takes its schema from a function states its limits and example there, not beside it.
+    const own = extra.some((e) => e.startsWith("schema_with = ")) ? [] : [...constraints(this.program, p), ...this.exampleList(p)];
+    const c = [...extra, ...own];
     return c.length ? `    #[schema(${c.join(", ")})]\n` : "";
   }
 
@@ -663,15 +688,11 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       return facts(this.program, m.target, name, prefix);
     })];
     if (derived || !this.documenting) return `${code}${constantsImpl(name, consts)}`;
-    const schema = {
-      description: getDoc(this.program, t),
-      oneOf: members.map((m) => ({
-        type: typeof m.value === "number" ? "integer" : "string",
-        enum: [m.value],
-        title: getSummary(this.program, m.target),
-        description: getDoc(this.program, m.target),
-      })),
-    };
+    // As `@typespec/openapi3` writes an enum: one `enum` (the default), or a `oneOf` of `const` members annotated with their title and doc.
+    const schema = { description: getDoc(this.program, t), type: numeric ? "number" : "string", enum: members.map((m) => m.value) };
+    const annotated = { description: getDoc(this.program, t), oneOf: members.map((m) => ({ const: m.value, title: getSummary(this.program, m.target), description: getDoc(this.program, m.target) })) };
+    // utoipa holds no `const`: the finished document takes the schema as it is written here.
+    if (this.config.enumStrategy === "annotated") this.config.exact.set(name, JSON.stringify(annotated));
     return `${code}${constantsImpl(name, consts)}\n${this.manual(name, jsonText(schema), [])}`;
   }
 
@@ -1084,6 +1105,66 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
     return name;
   }
 
+  /** The reference to a scalar the application writes as a primitive (`Instant`), or the list of one, or undefined. */
+  private refSchema(t: Type): object | undefined {
+    const scalar = this.contractScalars.get(t);
+    if (scalar) return { $ref: `#/components/schemas/${scalar.name}` };
+    if (t.kind === "Model" && t.name === "Array" && t.indexer) {
+      const items = this.refSchema(t.indexer.value);
+      return items ? { type: "array", items } : undefined;
+    }
+    return undefined;
+  }
+
+  /** The schemas of the members of a union with the literals of one kind written as one `enum`, in the order the kinds first come. */
+  private groupLiterals(variants: Type[], schemas: object[]): object[] {
+    const grouped = new Map<string, { type: string; enum: unknown[] }>();
+    const out: object[] = [];
+    variants.forEach((v, i) => {
+      if (v.kind !== "String" && v.kind !== "Number" && v.kind !== "Boolean") return void out.push(schemas[i]);
+      const kind = v.kind === "String" ? "string" : v.kind === "Boolean" ? "boolean" : Number.isInteger((v as any).value) ? "integer" : "number";
+      let group = grouped.get(kind);
+      if (!group) {
+        group = { type: kind, enum: [] };
+        grouped.set(kind, group);
+        out.push(group);
+      }
+      group.enum.push((v as any).value);
+    });
+    return out;
+  }
+
+  /**
+   * The schema of a type a property of `T | null` holds, as JSON: a scalar the document writes by itself, a list of one, or a type the
+   * emitter writes (a reference to its component). Undefined for any other type (the derive writes it).
+   */
+  private plainSchema(v: Type, property: ModelProperty): object | undefined {
+    const scalar = this.contractScalars.get(v);
+    if (scalar) return { $ref: `#/components/schemas/${scalar.name}` };
+    const withLimits = (schema: object) => schema; // the limits a property states are the union's, beside its anyOf
+    if (v.kind === "Model" && v.name === "Array" && v.indexer) {
+      const items = this.plainSchema(v.indexer.value, property);
+      return items ? { type: "array", items } : undefined;
+    }
+    if (v.kind === "Scalar" && v.namespace?.name === "TypeSpec") {
+      const rust = this.rust(v);
+      if (rust === "String" && v.name === "string") return withLimits({ type: "string" });
+      if (rust === "bool") return withLimits({ type: "boolean" });
+      const number = /^[iu](8|16|32|64)$/.exec(rust);
+      if (number && v.name !== "safeint" && v.name !== "integer") return withLimits({ type: "integer", format: v.name });
+      if (/^f(32|64)$/.test(rust) && (v.name === "float32" || v.name === "float64")) return withLimits({ type: "number", format: v.name });
+      return undefined;
+    }
+    if (v.kind === "Model" || v.kind === "Enum" || v.kind === "Union" || v.kind === "Scalar") {
+      // An instance of a template is written in place, not a component to refer to.
+      if ((v as any).templateMapper) return undefined;
+      const ty = this.rust(v);
+      if (!/^[A-Z]\w*$/.test(ty) || !this.defs.has(ty) || this.genericStructs.has(ty)) return undefined;
+      return { $ref: `#/components/schemas/${ty}` };
+    }
+    return undefined;
+  }
+
   /**
    * A property typed `"serving"` or `"a" | "b"` is a string whose values the schema lists; a derive cannot say so, so the field takes
    * its schema from a generated function. Returns the function's name, or undefined for any other type.
@@ -1094,10 +1175,18 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         : v.kind === "Number" ? { type: Number.isInteger(v.value) ? "integer" : "number", enum: [v.value] }
         : v.kind === "Boolean" ? { type: "boolean", enum: [v.value] }
         : isNull(v) ? { type: "null" } : undefined;
+    // A scalar the application writes as a primitive, or a list of it, is a reference to the scalar's component.
+    const direct = t.kind === "Scalar" || (t.kind === "Model" && t.name === "Array") ? this.refSchema(t) : undefined;
+    if (direct) return this.schemaFn(owner, property, direct);
     const variants = t.kind === "Union" && !t.name ? deepVariants(flattenUnion(t)).map(([, v]) => v.type) : [t];
-    const schemas = variants.map(one);
+    // `T | null`, with T no literal: `anyOf` of T and `null`, as the TypeSpec document writes it (a derive writes `type: [T, null]`).
+    const nullable = variants.length === 2 && variants.some(isNull) && !variants.some((v) => one(v) !== undefined && !isNull(v));
+    const schemas = variants.map((v) => one(v) ?? (nullable ? this.plainSchema(v, property) : undefined));
     if (schemas.some((s) => s === undefined) || variants.every(isNull)) return undefined;
-    return this.schemaFn(owner, property, schemas.length === 1 ? schemas[0]! : { anyOf: schemas });
+    // The literals of one kind are one `enum`, as `@typespec/openapi3` groups them (its annotated strategy writes a `const` each, which utoipa cannot hold).
+    const members = this.groupLiterals(variants, schemas as object[]);
+    // The limits a property states are beside the `anyOf`, as `@typespec/openapi3` applies them to the whole property.
+    return this.schemaFn(owner, property, members.length === 1 ? members[0]! : { anyOf: members, ...(nullable ? constraintValues(this.program, property) : {}) });
   }
 
   /**
@@ -1108,8 +1197,7 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
   private formatSchema(owner: string, property: ModelProperty): string | undefined {
     const t = property.type;
     if (t.kind !== "Scalar" || t.namespace?.name !== "TypeSpec" || !/^(uint(8|16|32|64)|int(8|16))$/.test(t.name)) return undefined;
-    if (constraints(this.program, property).length) return undefined; // a stated bound is the derive's to write
-    return this.schemaFn(owner, property, { type: "integer", format: t.name });
+    return this.schemaFn(owner, property, { type: "integer", format: t.name, ...constraintValues(this.program, property) });
   }
 
   /** A property typed `null` (a `()`) is `type: null` in the TypeSpec document; a derive writes `default: null`. */
@@ -1131,7 +1219,9 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       // With `schema_with` the derive no longer adds the field's doc as its description.
       const description = getDoc(this.program, property);
       const fallback = property.defaultValue ? { default: serializeValueAsJson(this.program, property.defaultValue, property.type) } : {};
-      return literalSchemaFn(name, JSON.stringify({ ...body, description, ...fallback }));
+      const examples = getExamples(this.program, property);
+      const example = examples.length ? { example: serializeValueAsJson(this.program, examples[0].value, property) } : {};
+      return literalSchemaFn(name, JSON.stringify({ ...body, description, ...fallback, ...example }));
     });
     return name;
   }

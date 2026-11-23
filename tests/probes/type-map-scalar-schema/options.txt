@@ -1,0 +1,2 @@
+type-map.Instant.path=std::string::String
+type-map.Instant.schema=contract

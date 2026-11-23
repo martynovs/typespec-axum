@@ -32,6 +32,8 @@ export interface Config {
   allowUntyped: boolean;
   /** `typespec`: schemas written by hand to match `@typespec/openapi3` to the letter; `derived`: whatever utoipa's derive writes; `none`: no document, so no utoipa. */
   document: "typespec" | "derived" | "none";
+  /** How an enum is written in a `typespec` document: `default`, one `enum`; `annotated`, a `oneOf` of `const` members with their titles and docs (as `@typespec/openapi3`'s option of the name). */
+  enumStrategy: "default" | "annotated";
   /** Whether a JSON body is read only from a request that says it is JSON. */
   requireJson: boolean;
   /** Types the contract names that the application writes itself: the contract's name (`Name` or `Namespace.Name`) to the Rust path of the type. */
@@ -40,6 +42,8 @@ export interface Config {
   extensionExpr: ReadonlyMap<string, ExtensionExpr>;
   /** Rust names of the types TypeSpec writes out in place wherever they are used (instances of a template). */
   inlined: Set<string>;
+  /** The components whose schema utoipa cannot hold (a `const`): the JSON of each is put into the finished document as it is. */
+  exact: Map<string, string>;
 }
 
 /** How an `x-*` extension of an operation is lowered: `const <const>: <type> = <macro>!(<the extension's JSON>);` in the operation's module. */
@@ -56,7 +60,7 @@ export interface ExtensionExpr {
 }
 
 /** A type written by hand: where it is, whether it is `Eq` (which the emitter cannot see), and `inline`: the path names no schema of the document, so its schema is written in place from its own `PartialSchema`; otherwise it is a component and implements `ToSchema`. */
-export interface TypeMapEntry { path: string; eq: boolean; inline: boolean; contract: boolean; partialEq: boolean }
+export interface TypeMapEntry { path: string; eq: boolean; inline: boolean; contract: boolean; partialEq: boolean; scalar: boolean }
 
 /** A contract the emitter cannot write faithfully: reported to the user as an error of the contract, not as a fault of the emitter. */
 export class Refusal extends Error {}

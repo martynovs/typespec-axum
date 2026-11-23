@@ -5,7 +5,7 @@ import { resolveInfo } from "@typespec/openapi";
 import { type Events, type Op, type Types, readOp } from "./contract.js";
 import { type Config, Refusal } from "./config.js";
 import { contractSchemaName, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
-import { generatedNotice, isKeyword, q } from "./rust.js";
+import { generatedNotice, isKeyword, q, rustStr } from "./rust.js";
 import { manualSchema } from "./types/templates.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, operationModule } from "./server/templates.js";
 import { CLIENT_CRATES, CLIENT_METHODS, checkClientNames, clientHeader, clientModule } from "./client/templates.js";
@@ -36,6 +36,20 @@ function eventSchema(e: Events, { inlined, typesPath }: Config) {
   const fn = `${snake(e.name)}_item`;
   const placeholder = manualSchema(e.name, 'json!({"type": "object"})', e.variants.flatMap((v) => schemaDeps(v.ty, inlined, `${typesPath}::`)), e.name + "Item");
   return { fn, code: `${eventItem(fn, item)}\n${placeholder}` };
+}
+
+/** The exact format of a parameter and the shape of a response header, which utoipa writes otherwise (a `uint32` is `int32`; a header is never required and a list is a string). */
+function shapesOf(o: Op): string[] {
+  const unsigned: Record<string, string> = { u8: "uint8", u16: "uint16", u32: "uint32", u64: "uint64" };
+  const params = o.docParams.flatMap((p) => {
+    // The parameter is its type, or the items of a list of it; one may be left out. Where it is (query, header...) is part of what names it.
+    const bare = (p.ty ?? "").replace(/^Option<(.*)>$/, "$1");
+    const list = bare.match(/^Vec<(.*)>$/);
+    const inner = list ? list[1] : bare;
+    return unsigned[inner] ? [`(${q(o.operationId)}, ${q(list ? "parameter-items" : "parameter")}, ${q(`${p.kind}:${p.name}`)}, ${q(unsigned[inner])})`] : [];
+  });
+  const headers = o.docResponses.flatMap((r) => r.headerKinds.map((h) => `(${q(o.operationId)}, ${q(String(r.status))}, ${q(h.name)}, ${q((h.optional ? "optional" : "required") + (h.repeated ? "-list" : ""))})`));
+  return [...params, ...headers];
 }
 
 /** Names an operation's trait may not take: items the module or the code in it uses. */
@@ -242,8 +256,10 @@ export function generate(program: Program, config: Config, types: Types, service
       info,
       paths: [...ops.map((o) => `${o.id}::run`), ...shared],
       // Every type the namespace declares is a schema, reachable or not (`omit-unreachable-types: false`), and so is each event item.
-      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components.map((path) => ([...config.typeMap.values()].some((e) => e.path === path && e.contract) ? `${config.typesPath}::${contractSchemaName(path)}` : path)), ...unions.keys()],
+      components: [...[...schemas].map((s) => `${config.typesPath}::${s}`), ...components.map((path) => ([...config.typeMap.values()].some((e) => e.path === path && e.contract) ? `${config.typesPath}::${contractSchemaName(path)}` : path)), ...types.contractScalars().map((struct) => `${config.typesPath}::${struct}`), ...unions.keys()],
       items: [...schemaOf].map(([name, s]) => `(${q(name + "Item")}, ${s.fn}())`),
+      shapes: config.document === "typespec" ? [...ops, ...sharedOps].flatMap(shapesOf) : [],
+      exact: [...config.exact].map(([name, json]) => `(${q(name)}, ${rustStr(json)})`),
       operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [
         ...ops.map((o) => {

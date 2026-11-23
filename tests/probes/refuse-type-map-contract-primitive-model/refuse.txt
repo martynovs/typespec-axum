@@ -1,0 +1,1 @@
+which for a primitive takes a scalar of the contract

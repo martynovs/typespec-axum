@@ -171,6 +171,8 @@ fn finish(
     document: &mut serde_json::Value,
     items: &[(&str, serde_json::Value)],
     operations: &[(&str, &[&str], bool, Option<bool>)],
+    exact: &[(&str, &str)],
+    shapes: &[(&str, &str, &str, &str)],
 ) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document
@@ -265,6 +267,70 @@ fn finish(
             schemas.remove(*name);
         }
     }
+    // What utoipa cannot hold (a const) is written into the document as it is.
+    for (name, schema) in exact {
+        if let Some(held) = document
+            .pointer_mut("/components/schemas")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|schemas| schemas.get_mut(*name))
+        {
+            *held = serde_json::from_str(schema).expect("the exact schema is JSON");
+        }
+    }
+    // What utoipa writes otherwise than the TypeSpec document does: the exact format of a parameter (uint32), and whether a response header is required or a list.
+    for (operation_id, place, name, shape) in shapes {
+        let paths = document
+            .get_mut("paths")
+            .and_then(serde_json::Value::as_object_mut)
+            .into_iter()
+            .flatten();
+        for (_, path) in paths {
+            for (_, operation) in path.as_object_mut().into_iter().flatten() {
+                if operation
+                    .get("operationId")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(operation_id)
+                {
+                    continue;
+                }
+                if *place == "parameter" || *place == "parameter-items" {
+                    // name is where the parameter is and what it is called: query:id.
+                    let (location, called) = name.split_once(':').unwrap_or(("", name));
+                    for parameter in operation
+                        .get_mut("parameters")
+                        .and_then(serde_json::Value::as_array_mut)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if parameter.get("name").and_then(serde_json::Value::as_str) == Some(called)
+                            && parameter.get("in").and_then(serde_json::Value::as_str)
+                                == Some(location)
+                        {
+                            if *place == "parameter" {
+                                parameter["schema"]["format"] = json!(shape);
+                            } else {
+                                parameter["schema"]["items"]["format"] = json!(shape);
+                            }
+                        }
+                    }
+                } else {
+                    // place is the status of the response: shape is required, optional, required-list or optional-list.
+                    let header =
+                        operation.pointer_mut(&format!("/responses/{place}/headers/{name}"));
+                    if let Some(header) = header.and_then(serde_json::Value::as_object_mut) {
+                        header.insert("required".to_owned(), json!(!shape.starts_with("optional")));
+                        if shape.ends_with("-list") {
+                            header.insert(
+                                "schema".to_owned(),
+                                json!({"type": "array", "items": {"type": "string"}}),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A parameter that may be null: the TypeSpec document writes anyOf of the type and null, where utoipa writes a list of types.
     if let Some(schemas) = document.pointer_mut("/components/schemas") {
         examples_as_list(schemas);
     }
@@ -1412,6 +1478,8 @@ pub mod petstore {
                 ("pet_events", &[], false, None),
                 ("touch_pet", &[], true, Some(false)),
             ],
+            &[],
+            &[],
         );
         document
     }

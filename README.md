@@ -326,6 +326,7 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 | `max-query-pairs` | `64` | So are more `&`-separated pairs. |
 | `max-json-depth` | `32` (at most `128`) | A JSON body that nests deeper (`{` and `[` outside strings) is refused (see `reject-with`) before it is parsed. |
 | `document` | `derived` | `derived`: the document is what utoipa's derives write. `typespec`: schemas written by hand to follow `@typespec/openapi3` more closely (enums as `oneOf` per member when `enum-strategy: annotated`, `format: uint8`, ...). `none`: no document: no `ApiDoc`, no `document()`, no `ToSchema`, no `#[utoipa::path]`, and the generated code does not use utoipa, so it is not a dependency. |
+| `enum-strategy` | `default` | With `document: typespec`, how an enum is written, as `@typespec/openapi3`'s option of the name: `default`, one `enum` of its values; `annotated`, a `oneOf` of `const` members with their `@summary` as `title` and their doc as `description` (OpenAPI 3.1). utoipa holds no `const`, so an annotated enum is put into the finished document as it is, and the schema of the type itself stays a plain `enum`. |
 | `server` | `true` | `false` leaves out `axum.rs`: see [Choosing what is written](#choosing-what-is-written). |
 | `client` | `false` | Also write `client.rs`: see [The client](#the-client). |
 | `irpc` | `false` | With `client`: also write `irpc.rs`, the contract as an irpc protocol: see [irpc](#irpc). |
@@ -401,6 +402,8 @@ just serve      # run the example
 ## Changes
 
 **0.4.0**
+- With `document: typespec`, the document is closer to `@typespec/openapi3`'s: a nullable field or parameter is `anyOf` of its type and `null` (not a list of types), a `uint32` (or `uint8`, `uint64`) field or parameter has its exact format and its stated limits, literals of one kind are one `enum`, an enum follows the new `enum-strategy` option, a response header is required or a list as the contract says, and a template instance that holds itself refers to its own component.
+- `schema: contract` on a type of the `type-map` that is a primitive (`Instant: String`) keeps the primitive as the Rust type and gives the document the scalar's own component, which fields of it (a list, a nullable one) refer to.
 - **Breaking:** with a document, a template is one generic struct, as it is without one (`Envelope<Pet>`), and each instance has its own schema type, so the application names `Envelope<T>` once under every `document`. 0.3.0 wrote a struct for each instance under a document (`EnvelopeOfPet`). The schema of an instance is written from the contract in `derived` mode too (nullable fields as `anyOf`, literals as `enum`), where the derive wrote it before.
 
 **0.3.0**

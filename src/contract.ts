@@ -43,7 +43,7 @@ export interface Const { name: string; ty: string; value: string }
 
 export interface DocParam { name: string; kind: string; ty: string; description?: string; attrs: string[]; consts: Const[]; explode?: boolean }
 export interface DocContent { media: string; ty?: string; item?: string }
-export interface DocResponse { status: number; description: string; headers: string[]; contents: DocContent[] }
+export interface DocResponse { status: number; description: string; headers: string[]; /** What each header is: whether it may be left out, and whether it repeats (a list). */ headerKinds: { name: string; optional: boolean; repeated: boolean }[]; contents: DocContent[] }
 
 export interface Op {
   id: string;
@@ -99,6 +99,8 @@ export interface Types {
   mappedHeld: (names: Iterable<string>) => string[];
   /** Whether a type is a generic struct, which derives no schema and so is no component. */
   generic: (name: string) => boolean;
+  /** The types that say the schema of the scalars the application writes as a primitive (`Instant`): components of the document. */
+  contractScalars: () => string[];
 }
 
 /** The tags of an operation: those of the interfaces and namespaces it sits in, outermost first, and its own. */
@@ -198,7 +200,7 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
 
       const note = (content?: DocResponse["contents"][number]) => {
         let d = docResponses.find((d) => d.status === status);
-        if (!d) docResponses.push((d = { status, description: r.description ?? "", headers: headers.map((h) => h.name), contents: [] }));
+        if (!d) docResponses.push((d = { status, description: r.description ?? "", headers: headers.map((h) => h.name), headerKinds: headers.map((h) => ({ name: h.name, optional: h.optional, repeated: h.repeated })), contents: [] }));
         // Two bodies of one media under one status (two errors) are one entry of the document: the first.
         if (content && !d.contents.some((x) => x.media === content.media)) d.contents.push(content);
       };
