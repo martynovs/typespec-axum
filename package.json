@@ -34,7 +34,8 @@
     "dist/package.json",
     "LICENSE-MIT",
     "LICENSE-APACHE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22"
