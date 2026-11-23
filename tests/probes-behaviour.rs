@@ -700,3 +700,17 @@ fn an_unsigned_parameter_has_its_format_where_it_is_and_on_its_items() {
         assert!(find("header", "x-count")["schema"]["format"].is_null(), "a string header has no unsigned format");
     }
 }
+
+#[cfg(not(no_document))]
+#[test]
+fn a_type_only_a_nullable_field_names_is_a_component() {
+    let documents = probes::documents();
+    let (_, document) = documents.iter().find(|(name, _)| *name == "nullable_global_type").expect("a document");
+    // `Far` is declared outside every namespace and reached through a field the document writes by hand: it is still a component.
+    assert_eq!(document["components"]["schemas"]["Far"]["properties"]["a"]["type"], "string", "{}", document["components"]["schemas"]);
+    // And the fields refer to it: a reference beside null, and the items of a list beside null.
+    let holder = &document["components"]["schemas"]["Holder"]["properties"];
+    let text = holder.to_string();
+    assert!(text.contains("#/components/schemas/Far"), "{holder}");
+    assert!(holder["far"].to_string().contains("null") && holder["fars"].to_string().contains("null"), "{holder}");
+}

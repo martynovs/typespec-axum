@@ -1160,6 +1160,8 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
       if ((v as any).templateMapper) return undefined;
       const ty = this.rust(v);
       if (!/^[A-Z]\w*$/.test(ty) || !this.defs.has(ty) || this.genericStructs.has(ty)) return undefined;
+      // The field takes its schema from a function, so the derive does not follow its type: the document must be told of it.
+      this.hidden.add(ty);
       return { $ref: `#/components/schemas/${ty}` };
     }
     return undefined;
