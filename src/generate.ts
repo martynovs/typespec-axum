@@ -7,6 +7,8 @@ import { type Config, Refusal } from "./config.js";
 import { contractSchemaName, namesPath, onlyPartial, schemaDeps, schemaExpr, withoutPaths } from "./schema.js";
 import { generatedNotice, isKeyword, lastSegment, q, rustStr } from "./rust.js";
 import { manualSchema } from "./types/templates.js";
+import { uploadSupport } from "./server/upload.js";
+import { multipartWriter } from "./client/upload.js";
 import { axumHeader, contractModule, eventItem, eventsEnum, operationModule } from "./server/templates.js";
 import { CLIENT_CRATES, CLIENT_METHODS, checkClientNames, clientHeader, clientModule } from "./client/templates.js";
 import { irpcHeader, irpcModule } from "./irpc/templates.js";
@@ -92,6 +94,8 @@ export function generate(program: Program, config: Config, types: Types, service
   const seen = new Map<string, { module: string; key: string; id: string }>();
   const modules = new Set<string>();
   const extensionsUsed = new Set<string>();
+  let uploads = false;
+  let forms = false;
   for (const svc of services) {
     if (!getService(program, svc.namespace)) throw new Refusal("the contract has no @service: put its operations in a namespace marked @service");
     // The Rust module is the whole name of the namespace (`Pets.V1` is `pets_v1`), so two services can end in the same word.
@@ -103,6 +107,13 @@ export function generate(program: Program, config: Config, types: Types, service
     if (modules.has(module)) throw new Refusal(`${whole}: two services are both the Rust module ${module}: rename one in the contract`);
     modules.add(module);
     const all = svc.operations.map((op) => readOp(program, config, types, problems, svc.namespace, op));
+    // The form of an operation is the struct `Form` of its module: the operation's trait, or a stream, of that name would be shadowed there.
+    const form = all.find((o) => o.upload?.kind === "form");
+    if (form && (form.trait === "Form" || all.some((o) => o.events?.name === "Form"))) {
+      throw new Refusal(`${module}: the operation ${form.id} takes a form, whose type is \`Form\` in its module: an operation named form, or a stream named Form, would be shadowed by it: rename one in the contract`);
+    }
+    uploads ||= all.some((o) => o.upload);
+    forms ||= all.some((o) => o.upload?.kind === "form");
     const routes = new Map<string, string>();
     for (const o of all) {
       if (routes.has(`${o.method} ${o.path}`)) throw new Refusal(`${module}: two operations are both ${o.method.toUpperCase()} ${o.path} (@sharedRoute): a router has one handler for a route`);
@@ -117,7 +128,7 @@ export function generate(program: Program, config: Config, types: Types, service
     // A route both services declare is written once, in the first, and the second's document lists it from there: so it must be the same
     // operation, to the name and tags the document gives it.
     const wire = (o: Op) =>
-      JSON.stringify([o.operationId, o.tags, o.deprecated, o.summary, o.description, o.params, o.docParams, o.body, o.bodyOptional, o.inputRefusal, o.answers, o.docResponses, o.extensions]);
+      JSON.stringify([o.operationId, o.tags, o.deprecated, o.summary, o.description, o.params, o.docParams, o.body, o.upload, o.bodyOptional, o.inputRefusal, o.answers, o.docResponses, o.extensions]);
     for (const o of all) {
       const first = seen.get(`${o.method} ${o.path}`);
       if (first !== undefined && first.key !== wire(o)) throw new Refusal(`${module}: ${o.method.toUpperCase()} ${o.path} is also served by ${first.module}, and the two differ: the route is written once`);
@@ -160,7 +171,7 @@ export function generate(program: Program, config: Config, types: Types, service
           if (onlyPartial(entry) && ty !== undefined && namesPath(ty, entry.path)) throw new Refusal(`${module}: ${o.id} has ${ty} as a body or an answer, which holds ${entry.path}, a type-map entry with inline: true: utoipa takes the schema of a body or an answer from ToSchema, so put it in a model`);
         }
       }
-      const mentioned = [o.body, ...o.answers.map((a) => a.ty), ...o.docParams.map((p) => p.ty), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.ty)), ...(o.events?.variants.map((v) => v.ty) ?? [])];
+      const mentioned = [o.body, ...(o.upload?.parts.filter((p) => p.kind === "json").map((p) => p.ty) ?? []), ...o.answers.map((a) => a.ty), ...o.docParams.map((p) => p.ty), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.ty)), ...(o.events?.variants.map((v) => v.ty) ?? [])];
       for (const ty of mentioned) {
         for (const [, name] of withoutPaths(ty ?? "", [...config.typeMap.values()].map((e) => e.path)).matchAll(/(?:\w+::)*([A-Z]\w*)/g)) {
           if (types.known(name)) mentionedNames.add(name);
@@ -262,7 +273,8 @@ export function generate(program: Program, config: Config, types: Types, service
       exactProperties: config.document === "typespec" ? config.exactProperties.map(([component, property, json]) => `(${q(component)}, ${q(property)}, ${rustStr(json)})`) : [],
       computed: config.document === "typespec" ? [...[...config.typeMap.values()].filter((e) => e.contract && types.known(contractSchemaName(e.path))).map((e) => e.path).map((path) => [lastSegment(path), `${config.typesPath}::${contractSchemaName(path)}`]), ...types.contractScalarNames()].map(([name, struct]) => `(${q(name)}, ${struct}::exact())`) : [],
       exact: [...config.exact].map(([name, json]) => `(${q(name)}, ${rustStr(json)})`),
-      operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body ? `Some(${!o.bodyOptional})` : "None"})`),
+      bodies: config.document === "none" ? [] : [...ops, ...sharedOps].filter((o) => o.upload).map((o) => `(${q(o.operationId)}, ${rustStr(o.upload!.requestBody)})`),
+      operations: [...ops, ...sharedOps].map((o) => `(${q(o.operationId)}, &[${o.tags.map(q).join(", ")}], ${o.deprecated}, ${o.body && !o.upload ? `Some(${!o.bodyOptional})` : "None"})`),
       body: [
         ...ops.map((o) => {
           const code = operationModule(o, config);
@@ -276,6 +288,10 @@ export function generate(program: Program, config: Config, types: Types, service
       ],
     }));
   }
+  if (forms) types.uploadFile();
+  // What an operation with a file or a form shares sits after the header, once.
+  if (uploads) out.splice(2, 0, uploadSupport(config, forms));
+  if (forms && config.client) clientOut.splice(1, 0, multipartWriter);
   const unusedExtensions = [...config.extensionExpr.keys()].filter((name) => !extensionsUsed.has(name));
   if (unusedExtensions.length) throw new Refusal(`extension-expr: no operation states ${unusedExtensions.join(", ")}`);
   if (problems.length) throw new Refusal(`untyped responses are not generated; name their shape in the contract:\n  ${problems.join("\n  ")}`);

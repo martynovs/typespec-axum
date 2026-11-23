@@ -7,6 +7,7 @@ import { getContentType } from "@typespec/events";
 
 import { type Config, Refusal } from "./config.js";
 import { constraints, facts } from "./constraints.js";
+import { uploadOf, type Upload } from "./upload.js";
 import { constPrefix, isKeyword, pascalIdent, rustField as field, uniqueNames } from "./rust.js";
 
 export interface Header { name: string; field: string; repeated: boolean; optional: boolean }
@@ -55,6 +56,8 @@ export interface Op {
   extensions: Extension[];
   params: Param[];
   body?: string;
+  /** A request body that is a file or a form of parts, which has no Rust type of the contract to be (`body` is then unset). */
+  upload?: Upload;
   /** Whether the request may have no body (`@body body?: T`), `Input::body` then being `Option<T>`. */
   bodyOptional: boolean;
   /** The media type the contract states for the body, when it states one. */
@@ -99,6 +102,8 @@ export interface Types {
   mappedHeld: (names: Iterable<string>) => string[];
   /** Whether a type is a generic struct, which derives no schema and so is no component. */
   generic: (name: string) => boolean;
+  /** Defines `UploadFile`, the type of a file of a form. */
+  uploadFile: () => void;
   /** The types that say the schema of the scalars the application writes as a primitive (`Instant`): components of the document. */
   contractScalars: () => string[];
   /** `[component, type]` of each scalar the application writes as a primitive: its component and the type that says its schema. */
@@ -125,7 +130,7 @@ function isArray(t: Type): boolean {
 /** A media type without its parameters (`application/json; charset=utf-8` is `application/json`). */
 const mediaOf = (type: string) => type.split(";")[0].trim().toLowerCase();
 
-export function readOp(program: Program, config: Config, { rust, untyped, displayable }: Types, problems: string[], service: Namespace, op: HttpOperation): Op {
+export function readOp(program: Program, config: Config, { rust, untyped, displayable, known }: Types, problems: string[], service: Namespace, op: HttpOperation): Op {
   // An operation of an interface or a namespace of its own is `Container_operation` in the document, as `@typespec/openapi3` names it;
   // an `@operationId` is the name.
   const container = op.operation.interface ?? op.operation.namespace;
@@ -250,11 +255,12 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
   }
   if (!answers.length) throw new Refusal(`${route}: operation ${id} has no answer`);
   const b = op.parameters.body;
-  if (b) {
+  const upload = b ? uploadOf(b, route, rust, known, !!b.property?.optional) : undefined;
+  if (b && !upload) {
     const media = (b as any).contentTypes as string[] | undefined;
     const json = (type: string) => mediaOf(type) === "application/json" || mediaOf(type).endsWith("+json");
     if ((b as any).bodyKind === "multipart" || (media ?? []).some((type) => !json(type))) {
-      throw new Refusal(`${route}: a request body is JSON; this one is ${(b as any).bodyKind === "multipart" ? "multipart" : (media ?? []).join(", ")}`);
+      throw new Refusal(`${route}: a request body is JSON, a file (bytes, File) or a multipart/form-data form; this one is ${(b as any).bodyKind === "multipart" ? "multipart" : (media ?? []).join(", ")}`);
     }
   }
   const summary = getSummary(program, op.operation);
@@ -262,7 +268,7 @@ export function readOp(program: Program, config: Config, { rust, untyped, displa
   return {
     id, operationId, trait: pascal(id), path: op.path, method: op.verb,
     extensions: [...getExtensions(program, op.operation)].map(([name, json]) => ({ name, json })),
-    params, body: b ? rust(b.type) : undefined, bodyOptional: !!b?.property?.optional,
+    params, body: b && !upload ? rust(b.type) : undefined, upload, bodyOptional: !!b?.property?.optional,
     bodyMedia: b && (b as any).contentTypes?.[0] ? mediaOf((b as any).contentTypes[0]) : undefined,
     // A body that does not decode is refused with the status the operation lists for it as a JSON answer: a refusal with no body or a plain-text one is not.
     inputRefusal: [400, 422, 401].find((status) => refused.has(status)),

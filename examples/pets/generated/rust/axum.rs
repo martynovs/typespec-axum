@@ -175,6 +175,7 @@ fn finish(
     shapes: &[(&str, &str, &str, &str)],
     exact_properties: &[(&str, &str, &str)],
     computed: &[(&str, serde_json::Value)],
+    bodies: &[(&str, &str)],
 ) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document
@@ -287,6 +288,26 @@ fn finish(
             .and_then(|properties| properties.get_mut(*property))
         {
             *held = serde_json::from_str(schema).expect("the exact property schema is JSON");
+        }
+    }
+    // The body of an operation that takes a file or a form is written as the TypeSpec document writes it: utoipa has no contentMediaType and no encoding.
+    for (operation_id, body) in bodies {
+        let paths = document
+            .get_mut("paths")
+            .and_then(serde_json::Value::as_object_mut)
+            .into_iter()
+            .flatten();
+        for (_, path) in paths {
+            for (_, operation) in path.as_object_mut().into_iter().flatten() {
+                if operation
+                    .get("operationId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(operation_id)
+                {
+                    operation["requestBody"] =
+                        serde_json::from_str(body).expect("the request body is JSON");
+                }
+            }
         }
     }
     // What utoipa cannot hold (a const) is written into the document as it is.
@@ -1499,6 +1520,7 @@ pub mod petstore {
                 ("pet_events", &[], false, None),
                 ("touch_pet", &[], true, Some(false)),
             ],
+            &[],
             &[],
             &[],
             &[],

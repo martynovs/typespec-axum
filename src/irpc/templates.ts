@@ -284,6 +284,9 @@ export const irpcModule = (module: string, ops: Op[], c: Config) => {
   for (const o of ops) {
     if (NAMES.has(o.trait)) throw new Refusal(`${module}: the operation ${o.id} is the variant ${o.trait} of the irpc protocol, a name the generated code uses: rename it in the contract`);
     if (FUNCTIONS.has(o.id)) throw new Refusal(`${module}: the operation ${o.id} takes the name of a function of the irpc module (${[...FUNCTIONS].join(", ")}): rename it in the contract`);
+    if (o.upload) {
+      throw new Refusal(`${module}: the operation ${o.id} takes a ${o.upload.kind === "form" ? "form" : "file"}, which an irpc protocol does not carry (it sends a request as one message of at most 16 MiB, as JSON): turn irpc off for this contract, or give the operation a JSON body`);
+    }
     if (o.events && (o.answers.length > 1 || o.answers[0].headers.length)) {
       throw new Refusal(`${module}: the stream ${o.id} has other answers or response headers, which an irpc stream cannot carry: give it one answer, the stream`);
     }

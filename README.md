@@ -46,7 +46,8 @@ rustfmt --edition 2024 src/generated/types.rs src/generated/axum.rs   # the emit
 ```toml
 # Cargo.toml
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path", "multipart"] }   # "multipart" only with a form
+bytes = "1"             # only with a file or a form
 form_urlencoded = "1"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
@@ -131,6 +132,21 @@ Also generated, per contract (namespace):
 
 Every `x-*` extension on an operation (`@extension("x-scope", "admin")`) is in its `Route::extensions` as `{ name, json }` and in the
 document: the contract carries it, your server decides what it means (authorization, rate limits, ...).
+
+## Files and forms
+
+A request body can be a file or a form, read with axum's own extractors and under axum's own body limit.
+
+| The contract | `Input::body` | Document |
+|---|---|---|
+| `@body body: bytes` (any `@header contentType`), or `@bodyRoot file: File` (or a model that extends it) | `axum::body::Bytes` (`Option<Bytes>` for `body?`) | `contentMediaType` for each media type |
+| `@multipartBody body: { title: HttpPart<string>; meta: HttpPart<Meta>; doc: HttpPart<File>; photos: HttpPart<File>[]; ... }` | `Form`, a struct of the operation with a field for each part: `String`, a scalar parsed from the text, a model read as JSON, or `UploadFile`; an optional part is an `Option`, a part that is an array a `Vec` | an object schema with `encoding`, as `@typespec/openapi3` writes it |
+
+- The media type is checked first: a body or a file part of a type the contract does not list is `415` (a file part that states no type is taken to be the contract's, as RFC 7578 allows; `*/*` and `image/*` allow any). A form is read by axum's `Multipart`, so a request that is not a form is the operation's listed refusal (`400`, `422`, `401`, as a JSON body that does not decode is), or axum's own answer when it lists none. A missing, repeated or unreadable part is the same. A body that cannot be read (too large) is axum's `413`.
+- **The limit is axum's.** The body is limited by `DefaultBodyLimit` as for any axum handler: 2 MiB unless your application adds the layer. `max-upload-bytes` sets the layer on the routes of the operations that take a file or a form, which replaces the application's for them. Parts that are text or JSON are bounded by `max-form-field-bytes` and the number of parts by `max-form-parts`. A body is read into memory (up to the limit, for each request in flight), so bound the number of uploads at once (`tower`'s `ConcurrencyLimit`) too.
+- `UploadFile` (in `types.rs`) holds `filename`, `content_type` and `contents: bytes::Bytes`; its `Debug` prints the length, not the bytes. The file name is the client's text: never use it as a path. A text part is read as UTF-8 whatever charset it states, and a file part is held whole, bounded only by the body's limit.
+- The client has the same `Form` (and `bytes::Bytes` for a file) in `Request::body` and writes the `multipart/form-data` body itself (with its own `Content-Type`, so a `content_type` of the request is not sent), with a boundary no part holds; no feature of `reqwest` is needed.
+- Not generated (the emit fails, saying why): `multipart/mixed`, a named model as the multipart body, a part with headers, a part that is a `File` with text contents, an optional form, irpc (a request is one message of at most 16 MiB there), and a file or `bytes` response. A part the contract does not list is read past.
 
 ## The client
 
@@ -324,6 +340,9 @@ shape under different parameter names (`/pets/{id}` and `/pets/{petId}`) on rout
 | `derive-eq` | `false` | `true` adds `Eq` to every struct, container and union whose parts are all `Eq`: a type with a float (`float32`, `float64`) is left at `PartialEq`, and so is one made of such a type or of a type of the `type-map` whose entry does not say `eq: true` (`String` and the integers need no word). |
 | `max-query-bytes` | `4096` | A longer query string is refused (see `reject-with`: `400` unless the operation lists another) before it is parsed. |
 | `max-query-pairs` | `64` | So are more `&`-separated pairs. |
+| `max-upload-bytes` | none (axum's `DefaultBodyLimit`) | The limit of a body on the routes that take a file or a form, set as axum's `DefaultBodyLimit` on each route. |
+| `max-form-field-bytes` | `65536` | The longest part of a form that is text or JSON (a file part is bounded by the body's limit): `413` beyond it. |
+| `max-form-parts` | `128` | The most parts a form may have: more is refused as a form that is not one. |
 | `max-json-depth` | `32` (at most `128`) | A JSON body that nests deeper (`{` and `[` outside strings) is refused (see `reject-with`) before it is parsed. |
 | `document` | `derived` | `derived`: the document is what utoipa's derives write. `typespec`: schemas written by hand to follow `@typespec/openapi3` more closely (enums as `oneOf` per member when `enum-strategy: annotated`, `format: uint8`, ...). `none`: no document: no `ApiDoc`, no `document()`, no `ToSchema`, no `#[utoipa::path]`, and the generated code does not use utoipa, so it is not a dependency. |
 | `enum-strategy` | `default` | With `document: typespec`, how an enum is written, as `@typespec/openapi3`'s option of the name: `default`, one `enum` of its values; `annotated`, a `oneOf` of `const` members with their `@summary` as `title` and their doc as `description` (OpenAPI 3.1). utoipa holds no `const`, so an annotated enum is put into the finished document as it is, and the schema of the type itself stays a plain `enum`. |
@@ -345,7 +364,7 @@ The emit fails with a diagnostic naming the type or operation, for what it canno
 - a response with no named shape (`untyped-responses: forbid`), and a `text/plain` body that is not a string, a number, a boolean or a scalar;
 - a path parameter that is not a whole segment (`/files/{name}.json`: axum's router, `matchit`, has no parameters followed by text in a segment), or a parameter whose field collides with a generated one (`body`, `unknown`);
 - a response media type other than JSON, `text/plain` or SSE, and a response without a numeric status;
-- a request body that is not JSON (`text/plain`, form, XML, multipart, `bytes`);
+- a request body that is not JSON, a file (`bytes`, `File`) or `multipart/form-data` (`text/plain`, `x-www-form-urlencoded`, XML), and the multipart cases listed under "Files and forms";
 - a path parameter written with an operator (`{+path}`, `{;id}`, `{id*}`: only a plain `{name}` segment is read), a field or parameter name with no ASCII letter or digit, two response headers that become one field;
 - an `@events` union whose event has no named shape, or is `text/plain` but not a string, number, boolean or scalar;
 - a contract with no `@service`, and a type named `Value` or `Object`;
@@ -400,6 +419,9 @@ just serve      # run the example
 `examples/pets/generated` is committed so a change to the emitter shows what it does to the output.
 
 ## Changes
+
+**0.5.0**
+- A request body can be a file (`bytes`, `File`: `Input::body` is `Bytes`) or a `multipart/form-data` form (`Input::body` is a `Form` of the operation, read with axum's `Multipart`), in the server, the client and the document (written as `@typespec/openapi3` writes it). New options `max-upload-bytes`, `max-form-field-bytes`, `max-form-parts`; a contract with a form needs axum's `multipart` feature and the `bytes` crate. See "Files and forms". `UploadFile` is now a name a model of the contract may not take.
 
 **0.4.0**
 - With `document: typespec`, the document is closer to `@typespec/openapi3`'s: a nullable field or parameter is `anyOf` of its type and `null` (not a list of types), a `uint32` (or `uint8`, `uint64`) field or parameter has its exact format and its stated limits, literals of one kind are one `enum`, an enum follows the new `enum-strategy` option, a response header is required or a list as the contract says, and a template instance that holds itself refers to its own component.

@@ -28,7 +28,7 @@ function ident(s: string): string {
 /** Names `types.rs` uses for the standard library and serde, which a type of the contract may not take: it would shadow them. */
 const RESERVED = new Set([
   "Option", "Some", "None", "Result", "Ok", "Err", "Vec", "String", "Box", "Self", "Default", "Send", "Sync", "Clone", "Debug", "Copy",
-  "Eq", "PartialEq", "Serialize", "Deserialize", "Value", "Object", "Decimal",
+  "Eq", "PartialEq", "Serialize", "Deserialize", "Value", "Object", "Decimal", "UploadFile",
 ]);
 
 type Flat = [string | symbol, Type & { kind: "UnionVariant" }][];
@@ -1333,6 +1333,27 @@ ${this.manual("Decimal", 'json!({"type": "number", "format": "decimal"})', [])}`
         this.templateParams = before;
       }
     });
+  }
+
+  /** A file of a request: what `Http.File` is on the wire, written once when an operation takes one. The contract's own `File` models are never written. */
+  uploadFile(): void {
+    this.alias("UploadFile", () => `/// A file sent in a form: the name and the media type its part states (neither is to be trusted: the name is the client's, never a path to write to), and its contents.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UploadFile {
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub contents: bytes::Bytes,
+}
+
+impl std::fmt::Debug for UploadFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadFile")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("contents", &format_args!("{} bytes", self.contents.len()))
+            .finish()
+    }
+}`);
   }
 
   alias(name: string, make: () => string): string {

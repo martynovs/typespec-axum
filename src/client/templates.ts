@@ -2,6 +2,7 @@
 import { type Answer, type Events, type Op } from "../contract.js";
 import { type Config, Refusal } from "../config.js";
 import { generatedNotice, q } from "../rust.js";
+import { formType, uploadBodyType, uploadRequestBody, UPLOAD_TYPES } from "./upload.js";
 
 const lines = (xs: string[]) => xs.filter((x) => x !== "").join("\n");
 
@@ -11,7 +12,7 @@ export const CLIENT_METHODS = new Set(["new", "transport", "base", "into_inner"]
 /** Names the client file defines or imports, which an event stream may not take (it is a type of the service's module). */
 const CLIENT_TYPES = new Set([
   "Client", "Api", "Transport", "Stream", "Error", "Request", "Refusal", "Answer", "Bytes", "Pin", "ByteStream", "StreamError", "TransportError",
-  "Reqwest", "Context", "Poll", "Future", "SseStream", "Option", "Result", "Vec", "Box", "String", "Self", "Some", "None", "Ok", "Err",
+  "Reqwest", "Context", ...UPLOAD_TYPES, "Poll", "Future", "SseStream", "Option", "Result", "Vec", "Box", "String", "Self", "Some", "None", "Ok", "Err",
 ]);
 
 /** The crates the client's code names by path, which a module or an operation of its may not be named like (it would shadow the crate). */
@@ -352,7 +353,8 @@ const requestFn = (o: Op) => {
   const named = (p: Op["params"][number], header: string) => p.kind === "header" && p.name.toLowerCase() === header;
   const contentTypeParam = o.params.find((p) => named(p, "content-type"));
   const acceptParam = o.params.find((p) => named(p, "accept"));
-  const bodyMedia = o.bodyMedia ?? "application/json";
+  // A file of any type (`*/*`, `image/*`) is sent as the bytes it is: a range is not a media type.
+  const bodyMedia = o.bodyMedia?.includes("*") ? "application/octet-stream" : o.bodyMedia ?? "application/json";
   const headers = o.params.filter((p) => p.kind === "header" && p !== contentTypeParam && p !== acceptParam).map((p) =>
     p.repeated
       ? `    for value in &input.${p.field} {\n        builder = builder.header(${q(p.name)}, value.as_str());\n    }`
@@ -361,7 +363,8 @@ const requestFn = (o: Op) => {
   const media = [...new Set([...o.answers.map((a) => a.media), ...o.docResponses.flatMap((r) => r.contents.map((c) => c.media))].filter(Boolean))];
   const encode = `serde_json::to_vec(body).map_err(|error| Error::Request(error.to_string()))?`;
   const contentType = contentTypeParam ? `input.${contentTypeParam.field}.as_deref().unwrap_or(${q(bodyMedia)})` : q(bodyMedia);
-  const body = !o.body ? "    let payload = Bytes::new();"
+  const body = o.upload ? uploadRequestBody(o, contentType)
+    : !o.body ? "    let payload = Bytes::new();"
     : o.bodyOptional ? `    let payload = match &input.body {\n        Some(body) => {\n            builder = builder.header(http::header::CONTENT_TYPE, ${contentType});\n            Bytes::from(${encode})\n        }\n        None => Bytes::new(),\n    };`
     : `    let body = &input.body;\n    builder = builder.header(http::header::CONTENT_TYPE, ${contentType});\n    let payload = Bytes::from(${encode});`;
   return `
@@ -479,8 +482,8 @@ pub mod ${o.id} {
     #[derive(Debug${serde(c)})]
     pub struct Request {
 ${lines(o.params.map((p) => `        pub ${p.field}: ${inputType(p)},`))}
-${o.body ? `        pub body: ${o.bodyOptional ? `Option<${o.body}>` : o.body},` : ""}
-    }
+${o.body ? `        pub body: ${o.bodyOptional ? `Option<${o.body}>` : o.body},` : ""}${o.upload ? `\n        pub body: ${uploadBodyType(o)},` : ""}
+    }${o.upload?.kind === "form" ? formType(o, c) : ""}
 ${answerTypes(o, o.events ? "" : serde(c))}
 ${refusalType(o, serde(c))}
 

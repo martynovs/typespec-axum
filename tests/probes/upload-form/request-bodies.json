@@ -1,0 +1,66 @@
+{
+  "post /form/{id}": {
+    "content": {
+      "multipart/form-data": {
+        "encoding": {
+          "avatar": {
+            "contentType": "*/*"
+          },
+          "count": {
+            "contentType": "text/plain"
+          },
+          "doc": {
+            "contentType": "*/*"
+          },
+          "ids": {
+            "contentType": "application/json"
+          },
+          "meta": {
+            "contentType": "application/json"
+          },
+          "photos": {
+            "contentType": "image/png, image/jpeg"
+          }
+        },
+        "schema": {
+          "properties": {
+            "avatar": {},
+            "count": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "doc": {},
+            "ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "meta": {
+              "$ref": "#/components/schemas/Meta"
+            },
+            "note": {
+              "type": "string"
+            },
+            "photos": {
+              "items": {},
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "count",
+            "meta",
+            "doc",
+            "photos"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "required": true
+  }
+}

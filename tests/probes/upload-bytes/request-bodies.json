@@ -1,0 +1,62 @@
+{
+  "post /file": {
+    "content": {
+      "*/*": {
+        "schema": {
+          "contentMediaType": "*/*"
+        }
+      }
+    },
+    "required": true
+  },
+  "post /octet": {
+    "content": {
+      "application/octet-stream": {
+        "schema": {
+          "contentMediaType": "application/octet-stream"
+        }
+      }
+    },
+    "required": true
+  },
+  "post /octet-optional": {
+    "content": {
+      "application/octet-stream": {
+        "schema": {
+          "contentMediaType": "application/octet-stream"
+        }
+      }
+    },
+    "required": false
+  },
+  "put /file-image": {
+    "content": {
+      "image/jpeg": {
+        "schema": {
+          "contentMediaType": "image/jpeg"
+        }
+      },
+      "image/png": {
+        "schema": {
+          "contentMediaType": "image/png"
+        }
+      }
+    },
+    "required": true
+  },
+  "put /octet-image": {
+    "content": {
+      "image/jpeg": {
+        "schema": {
+          "contentMediaType": "image/jpeg"
+        }
+      },
+      "image/png": {
+        "schema": {
+          "contentMediaType": "image/png"
+        }
+      }
+    },
+    "required": true
+  }
+}

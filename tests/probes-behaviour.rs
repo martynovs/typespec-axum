@@ -731,3 +731,283 @@ fn a_typespec_document_says_what_the_typespec_document_says() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Files and forms
+// ---------------------------------------------------------------------------------------------------------------------
+
+mod uploads {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// A hand-written `multipart/form-data` body: `(name, Some((filename, media type)), contents)` for each part.
+    pub fn form(parts: &[(&str, Option<(&str, &str)>, &[u8])]) -> (String, Vec<u8>) {
+        let mut out = Vec::new();
+        for (name, file, contents) in parts {
+            out.extend_from_slice(format!("--XBOUNDARY\r\nContent-Disposition: form-data; name=\"{name}\"").as_bytes());
+            match file {
+                Some((filename, media)) => out.extend_from_slice(format!("; filename=\"{filename}\"\r\nContent-Type: {media}\r\n\r\n").as_bytes()),
+                None => out.extend_from_slice(b"\r\n\r\n"),
+            }
+            out.extend_from_slice(contents);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"--XBOUNDARY--\r\n");
+        ("multipart/form-data; boundary=XBOUNDARY".to_owned(), out)
+    }
+
+    pub async fn send(app: axum::Router, method: &str, path: &str, media: Option<&str>, body: Vec<u8>) -> (StatusCode, String) {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(media) = media {
+            request = request.header("content-type", media);
+        }
+        let response = app.oneshot(request.body(Body::from(body)).expect("a request")).await.expect("a response");
+        let status = response.status();
+        (status, String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.expect("a body")).into_owned())
+    }
+
+    /// The request a client built, as the router takes it.
+    pub fn into_axum(request: axum::http::Request<bytes::Bytes>) -> Request<Body> {
+        let (parts, body) = request.into_parts();
+        Request::from_parts(parts, Body::from(body))
+    }
+}
+
+mod upload_form_api {
+    use super::uploads::*;
+    use axum::http::StatusCode;
+    use probes::upload_form::api::probe::{mount, upload, Upload};
+    use probes::upload_form::client::probe::upload as client;
+    use probes::upload_form::types::{Meta, Out, UploadFile};
+    use tower::ServiceExt;
+
+    struct Api;
+    impl Upload for Api {
+        fn upload_handler(&self) -> Option<upload::Call> {
+            Some(upload::call(|_, input| async move {
+                let b = input.body;
+                Ok(Out { v: format!("{:?}", (&input.id, &b.title, b.count, &b.meta.tags, &b.doc, &b.doc.contents, &b.photos, &b.note, &b.avatar, &b.ids)) })
+            }))
+        }
+    }
+
+    fn app() -> axum::Router {
+        mount(axum::Router::new(), &Api)
+    }
+
+    fn file(name: &str, media: &str, contents: &[u8]) -> UploadFile {
+        UploadFile { filename: Some(name.to_owned()), content_type: Some(media.to_owned()), contents: bytes::Bytes::copy_from_slice(contents) }
+    }
+
+    fn sample() -> client::Form {
+        client::Form {
+            title: "a \"quoted\" title\r\nsecond line".to_owned(),
+            count: -7,
+            meta: Meta { tags: vec!["x".to_owned(), "y".to_owned()] },
+            doc: file("na\"me.pdf", "application/pdf", b"--XBOUNDARY\r\nnot a boundary\xff\x00"),
+            photos: vec![file("one.png", "image/png", b"1"), file("two.jpg", "image/jpeg; q=1", b"22")],
+            note: None,
+            avatar: Some(file("à.png", "image/png", &[0; 3])),
+            ids: Some(vec!["a".to_owned(), "b".to_owned()]),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_form_the_client_writes_is_read_back_by_the_server() {
+        let form = sample();
+        let request = client::request("http://x", &client::Request { id: "i-1".to_owned(), content_type: None, body: form.clone() }).expect("a request");
+        let response = app().oneshot(into_axum(request)).await.expect("a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("a body");
+        let said: Out = serde_json::from_slice(&text).expect("an Out");
+        let b = form;
+        assert_eq!(said.v, format!("{:?}", (&"i-1".to_owned(), &b.title, b.count, &b.meta.tags, &b.doc, &b.doc.contents, &b.photos, &b.note, &b.avatar, &b.ids)));
+    }
+
+    fn base() -> Vec<(&'static str, Option<(&'static str, &'static str)>, &'static [u8])> {
+        vec![
+            ("title", None, b"t"),
+            ("count", None, b"3"),
+            ("meta", None, b"{\"tags\":[]}"),
+            ("doc", Some(("d.bin", "application/octet-stream")), b"data"),
+            ("photos", Some(("p.png", "image/png")), b"p"),
+        ]
+    }
+
+    async fn ask(parts: &[(&str, Option<(&str, &str)>, &[u8])]) -> (StatusCode, String) {
+        let (media, body) = form(parts);
+        send(app(), "POST", "/form/x", Some(&media), body).await
+    }
+
+    #[tokio::test]
+    async fn a_form_that_is_not_the_contracts_is_refused() {
+        assert_eq!(ask(&base()).await.0, StatusCode::OK);
+        // A part the contract does not list is read past.
+        let mut extra = base();
+        extra.push(("surprise", None, b"x"));
+        assert_eq!(ask(&extra).await.0, StatusCode::OK);
+        // A part with no media type is the contract's; a file part of another media type is not accepted.
+        let mut typed = base();
+        typed[4] = ("photos", Some(("p.txt", "text/plain")), b"p");
+        assert_eq!(ask(&typed).await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // The listed refusal of an operation is the answer to a form that is not one: 400 here.
+        let mut missing = base();
+        missing.remove(0);
+        assert_eq!(ask(&missing).await.0, StatusCode::BAD_REQUEST);
+        let mut no_photos = base();
+        no_photos.pop();
+        assert_eq!(ask(&no_photos).await.0, StatusCode::BAD_REQUEST);
+        let mut twice = base();
+        twice.push(("title", None, b"again"));
+        assert_eq!(ask(&twice).await.0, StatusCode::BAD_REQUEST);
+        let mut number = base();
+        number[1] = ("count", None, b"three");
+        assert_eq!(ask(&number).await.0, StatusCode::BAD_REQUEST);
+        let mut json = base();
+        json[2] = ("meta", None, b"{");
+        assert_eq!(ask(&json).await.0, StatusCode::BAD_REQUEST);
+        let mut utf8 = base();
+        utf8[0] = ("title", None, b"\xff\xfe");
+        assert_eq!(ask(&utf8).await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_a_form_is_refused() {
+        assert_eq!(send(app(), "POST", "/form/x", Some("application/json"), b"{}".to_vec()).await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(send(app(), "POST", "/form/x", None, vec![]).await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // No boundary.
+        assert_eq!(send(app(), "POST", "/form/x", Some("multipart/form-data"), vec![]).await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_parts_and_what_they_hold_are_bounded() {
+        // A text part over 64 KiB, and more parts than the form may have.
+        let big = vec![b'a'; 64 * 1024 + 1];
+        let mut long = base();
+        long[0] = ("title", None, &big);
+        assert_eq!(ask(&long).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+        let mut many = base();
+        for _ in 0..200 {
+            many.push(("surprise", None, b"x"));
+        }
+        assert_eq!(ask(&many).await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_axums_own_and_the_applications_layer_applies() {
+        // axum's default (2 MiB) bounds a file...
+        let big = vec![0_u8; 2 * 1024 * 1024 + 16];
+        let mut parts = base();
+        parts[3] = ("doc", Some(("d.bin", "application/octet-stream")), &big);
+        assert_eq!(ask(&parts).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+        // ...and the application's `DefaultBodyLimit` replaces it, in either direction.
+        let (media, body) = form(&base());
+        let tight = app().layer(axum::extract::DefaultBodyLimit::max(64));
+        assert_eq!(send(tight, "POST", "/form/x", Some(&media), body.clone()).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+        let (media, body) = form(&parts);
+        let wide = app().layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024));
+        assert_eq!(send(wide, "POST", "/form/x", Some(&media), body).await.0, StatusCode::OK);
+    }
+}
+
+mod upload_bytes_api {
+    use super::uploads::*;
+    use axum::http::StatusCode;
+    use probes::upload_bytes::api::probe::*;
+    use probes::upload_bytes::client::probe as client;
+    use probes::upload_bytes::types::Out;
+    use tower::ServiceExt;
+
+    struct Api;
+    macro_rules! echo {
+        ($trait:ident, $method:ident, $module:ident) => {
+            impl $trait for Api {
+                fn $method(&self) -> Option<$module::Call> {
+                    Some($module::call(|_, input| async move { Ok(Out { v: format!("{:?}", input.body) }) }))
+                }
+            }
+        };
+    }
+    echo!(Octet, octet_handler, octet);
+    echo!(OctetImage, octet_image_handler, octet_image);
+    echo!(OctetOptional, octet_optional_handler, octet_optional);
+    echo!(FileAny, file_any_handler, file_any);
+    echo!(FileImage, file_image_handler, file_image);
+
+    fn app() -> axum::Router {
+        mount(axum::Router::new(), &Api)
+    }
+
+    async fn ask(method: &str, path: &str, media: Option<&str>, body: &[u8]) -> (StatusCode, String) {
+        send(app(), method, path, media, body.to_vec()).await
+    }
+
+    #[tokio::test]
+    async fn a_binary_body_is_read_as_bytes_of_its_media_type() {
+        let (status, said) = ask("POST", "/octet", Some("application/octet-stream"), b"\x00\xffab").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(serde_json::from_str::<Out>(&said).expect("an Out").v, format!("{:?}", bytes::Bytes::from_static(b"\x00\xffab")));
+        // Another media type is not accepted; a list of media types is a list of what is.
+        assert_eq!(ask("POST", "/octet", Some("text/plain"), b"x").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(ask("POST", "/octet", None, b"x").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(ask("PUT", "/octet-image", Some("image/png"), b"x").await.0, StatusCode::OK);
+        assert_eq!(ask("PUT", "/octet-image", Some("image/jpeg"), b"x").await.0, StatusCode::OK);
+        assert_eq!(ask("PUT", "/octet-image", Some("image/gif"), b"x").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(ask("PUT", "/file-image", Some("image/gif"), b"x").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(ask("PUT", "/file-image", Some("image/png"), b"x").await.0, StatusCode::OK);
+        // A File of any type takes any, and none.
+        assert_eq!(ask("POST", "/file", Some("application/pdf"), b"x").await.0, StatusCode::OK);
+        assert_eq!(ask("POST", "/file", None, b"x").await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_binary_body_may_be_left_out() {
+        let (status, said) = ask("POST", "/octet-optional", None, b"").await;
+        assert_eq!((status, serde_json::from_str::<Out>(&said).expect("an Out").v), (StatusCode::OK, "None".to_owned()));
+        let (_, said) = ask("POST", "/octet-optional", Some("application/octet-stream"), b"a").await;
+        assert_eq!(serde_json::from_str::<Out>(&said).expect("an Out").v, "Some(b\"a\")");
+    }
+
+    #[tokio::test]
+    async fn the_clients_binary_request_reaches_the_server() {
+        let request = client::octet::request("http://x", &client::octet::Request { content_type: None, body: bytes::Bytes::from_static(b"\x01\x02") }).expect("a request");
+        assert_eq!(request.headers()["content-type"], "application/octet-stream");
+        let response = app().oneshot(into_axum(request)).await.expect("a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = client::file_any::request("http://x", &client::file_any::Request { body: bytes::Bytes::from_static(b"z") }).expect("a request");
+        assert_eq!(request.headers()["content-type"], "application/octet-stream", "a File of any type is sent as bytes");
+        assert_eq!(app().oneshot(into_axum(request)).await.expect("a response").status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_route_limit_is_the_option_and_beats_the_applications_layer() {
+        // `max-upload-bytes` of this probe is 1024: set on the route as axum's `DefaultBodyLimit`.
+        let small = vec![0_u8; 1000];
+        let large = vec![0_u8; 2000];
+        assert_eq!(ask("POST", "/octet", Some("application/octet-stream"), &small).await.0, StatusCode::OK);
+        assert_eq!(ask("POST", "/octet", Some("application/octet-stream"), &large).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+        // The media type is judged before the body is read: a body too large of a type not accepted is 415.
+        assert_eq!(ask("POST", "/octet", Some("text/plain"), &large).await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let wide = app().layer(axum::extract::DefaultBodyLimit::max(1 << 20));
+        assert_eq!(send(wide, "POST", "/octet", Some("application/octet-stream"), large).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[cfg(not(no_document))]
+#[test]
+fn a_file_and_a_form_are_written_in_the_document_as_the_typespec_one_does() {
+    use serde_json::Value;
+    let documents = probes::documents();
+    for (probe, golden) in [
+        ("upload_form", include_str!("../../../tests/probes/upload-form/request-bodies.json")),
+        ("upload_bytes", include_str!("../../../tests/probes/upload-bytes/request-bodies.json")),
+    ] {
+        let (_, document) = documents.iter().find(|(name, _)| *name == probe).expect("the probe");
+        let golden: Value = serde_json::from_str(golden).expect("JSON");
+        for (key, body) in golden.as_object().expect("an object") {
+            let (method, path) = key.split_once(' ').expect("a key");
+            assert_eq!(&document["paths"][path][method]["requestBody"], body, "{probe}: {key}");
+        }
+    }
+}

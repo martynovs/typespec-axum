@@ -29,6 +29,9 @@ export interface EmitterOptions {
   "max-query-bytes"?: number;
   /** How deep a JSON request body may nest (`{` and `[`) before it is parsed. Default 32. */
   "max-json-depth"?: number;
+  "max-upload-bytes"?: number;
+  "max-form-field-bytes"?: number;
+  "max-form-parts"?: number;
   /** The most `&`-separated pairs a generated handler parses. Default 64. */
   "max-query-pairs"?: number;
   /** `forbid` (default) fails the emit for a response with no named shape; `allow` types it `serde_json::Value`. */
@@ -97,6 +100,9 @@ export const options: JSONSchemaType<EmitterOptions> = {
     irpc: { type: "boolean", nullable: true, description: "Whether irpc.rs is written.", default: false },
     "derive-eq": { type: "boolean", nullable: true, description: "Whether a type derives Eq when every part of it is Eq.", default: false },
     "max-query-bytes": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The longest query string a generated handler parses (at most what a 32-bit `usize` holds).", default: 4096 },
+    "max-upload-bytes": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The most a request body may hold on an operation that takes a file or a form: set on its route as axum's `DefaultBodyLimit`, in place of the 2 MiB axum (or the application's layer) allows. Unset, axum's own limit applies." },
+    "max-form-field-bytes": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The most one part of a form that is text or JSON may hold (a file part is bounded by the body's limit).", default: 65536 },
+    "max-form-parts": { type: "integer", nullable: true, minimum: 1, maximum: 65535, description: "The most parts a form may have.", default: 128 },
     "max-json-depth": { type: "integer", nullable: true, minimum: 1, maximum: 128, description: "How deep a JSON request body may nest before it is parsed (serde_json itself stops at 128).", default: 32 },
     "max-query-pairs": { type: "integer", nullable: true, minimum: 1, maximum: 4294967295, description: "The most pairs a generated handler parses (at most what a 32-bit `usize` holds).", default: 64 },
     "enum-strategy": { type: "string", enum: ["default", "annotated"], nullable: true, description: "With `document: typespec`, how an enum is written, as `@typespec/openapi3`'s option of this name.", default: "default" },
@@ -199,6 +205,9 @@ export function resolveConfig(o: EmitterOptions, generator: string): { config: C
       maxQueryBytes: o["max-query-bytes"] ?? 4096,
       maxQueryPairs: o["max-query-pairs"] ?? 64,
       maxJsonDepth: o["max-json-depth"] ?? 32,
+      maxUploadBytes: o["max-upload-bytes"] ?? undefined,
+      maxFormFieldBytes: o["max-form-field-bytes"] ?? 65536,
+      maxFormParts: o["max-form-parts"] ?? 128,
       allowUntyped: o["untyped-responses"] === "allow",
       document,
       enumStrategy: o["enum-strategy"] ?? "default",

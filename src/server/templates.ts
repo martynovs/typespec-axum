@@ -6,6 +6,7 @@ import type { Config, ExtensionExpr } from "../config.js";
 import type { Answer, Events, Op } from "../contract.js";
 import { q, rustJson } from "../rust.js";
 import { constantsImpl } from "../types/templates.js";
+import { formTypes, uploadExtraction } from "./upload.js";
 import { forSchema, isInline, onlyPartial, schemaTypes } from "../schema.js";
 
 const lines = (items: string[]) => items.join("\n");
@@ -171,7 +172,7 @@ fn missing_segment() -> AxResponse {
 
 ${c.document === "none" ? "" : `/// What utoipa cannot say, applied to the document it built: OpenAPI 3.2, no license, and the stream item schemas written in place
 /// of their placeholder components.
-fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)], exact: &[(&str, &str)], shapes: &[(&str, &str, &str, &str)], exact_properties: &[(&str, &str, &str)], computed: &[(&str, serde_json::Value)]) {
+fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)], operations: &[(&str, &[&str], bool, Option<bool>)], exact: &[(&str, &str)], shapes: &[(&str, &str, &str, &str)], exact_properties: &[(&str, &str, &str)], computed: &[(&str, serde_json::Value)], bodies: &[(&str, &str)]) {
     document["openapi"] = json!("3.2.0");
     if let Some(info) = document.get_mut("info").and_then(serde_json::Value::as_object_mut) {
         info.remove("license");
@@ -232,6 +233,17 @@ fn finish(document: &mut serde_json::Value, items: &[(&str, serde_json::Value)],
     for (component, property, schema) in exact_properties {
         if let Some(held) = document.pointer_mut("/components/schemas").and_then(|schemas| schemas.get_mut(*component)).and_then(|schema| schema.get_mut("properties")).and_then(|properties| properties.get_mut(*property)) {
             *held = serde_json::from_str(schema).expect("the exact property schema is JSON");
+        }
+    }
+    // The body of an operation that takes a file or a form is written as the TypeSpec document writes it: utoipa has no contentMediaType and no encoding.
+    for (operation_id, body) in bodies {
+        let paths = document.get_mut("paths").and_then(serde_json::Value::as_object_mut).into_iter().flatten();
+        for (_, path) in paths {
+            for (_, operation) in path.as_object_mut().into_iter().flatten() {
+                if operation.get("operationId").and_then(serde_json::Value::as_str) == Some(operation_id) {
+                    operation["requestBody"] = serde_json::from_str(body).expect("the request body is JSON");
+                }
+            }
         }
     }
     // What utoipa cannot hold (a const) is written into the document as it is.
@@ -452,6 +464,10 @@ ${o.answers.length > 1 ? `        match answer {\n${lines(arms)}\n        }` : a
 };
 
 const bodyExtraction = (o: Op, config: Config) => {
+  if (o.upload) {
+    // A form that is not one: refused as a body that does not decode is, or axum's own answer when the operation lists no such status.
+    return uploadExtraction(o, (native) => (o.inputRefusal === undefined ? native : `reject(AxStatusCode::${refusalStatus(o)}, "the request body does not match the API contract")`));
+  }
   if (!o.body) return "";
   // An operation that lists no status for it keeps axum's own answer to a body that does not decode, with or without `reject-with`.
   const rejection = o.inputRefusal === undefined ? "error.into_response()"
@@ -501,7 +517,7 @@ ${queryPass(o)}${bodyExtraction(o, config)}
         let input = Input {
             unknown,
 ${lines(o.params.map((p) => `            ${p.field}: ${value(p)},`))}
-${o.body ? "            body," : ""}
+${o.body || o.upload ? "            body," : ""}
         };
         match call(parts, input).await {
             Ok(answer) => respond(answer),
@@ -556,7 +572,7 @@ const utoipaPath = (o: Op, config: Config) => {
     o.summary && `summary = ${q(o.summary)}`,
     o.description && `description = ${q(o.description)}`,
     params.length && `params(${params.join(", ")})`,
-    o.body && `request_body(content = ${requestContent(o, config)}, content_type = ${q(o.bodyMedia ?? "application/json")})`,
+    o.body && !o.upload && `request_body(content = ${requestContent(o, config)}, content_type = ${q(o.bodyMedia ?? "application/json")})`,
     `responses(${responses.join(", ")})`,
     o.extensions.length && `extensions(${o.extensions.map((e) => `(${q(e.name)} = json!(${rustJson(e.json)}))`).join(", ")})`,
   ].filter(Boolean);
@@ -596,8 +612,8 @@ ${lines(extensionConsts(o, config))}
         /// How many query pairs name a parameter this operation does not list.
         pub unknown: usize,
 ${lines(o.params.map((p) => `        pub ${p.field}: ${inputType(p)},`))}
-${o.body ? `        pub body: ${o.bodyOptional ? `Option<${o.body}>` : o.body},` : ""}
-    }
+${o.body ? `        pub body: ${o.bodyOptional ? `Option<${o.body}>` : o.body},` : ""}${uploadInput(o)}
+    }${o.upload?.kind === "form" ? formTypes(o, config) : ""}
 ${answerTypes(o)}
 ${respondFn(o)}
 
@@ -630,12 +646,19 @@ ${respondFn(o)}
     /// Mounts this operation's route on \`router\` when the node has a handler for it, and leaves \`router\` as it is when not.
     pub fn mount<S: ${o.trait}>(router: AxRouter, api: &S) -> AxRouter {
         match api.${handlerName(o)}() {
-            Some(call) => router.route(Operation::${operationConst(o)}.as_ref().path, axum::routing::${o.method}(run).with_state(call)),
+            Some(call) => router.route(Operation::${operationConst(o)}.as_ref().path, axum::routing::${o.method}(run).with_state(call)${o.upload && config.maxUploadBytes !== undefined ? `.layer(axum::extract::DefaultBodyLimit::max(${config.maxUploadBytes}))` : ""}),
             None => router,
         }
     }
 ${config.document === "none" ? "" : utoipaPath(o, config)}${runFn(o, config)}
 }`;
+
+/** The `Input::body` of an operation that takes a file (its bytes) or a form. */
+const uploadInput = (o: Op) => {
+  if (!o.upload) return "";
+  const ty = o.upload.kind === "form" ? "Form" : o.bodyOptional ? "Option<AxBytes>" : "AxBytes";
+  return `\n        pub body: ${ty},`;
+};
 
 /** The events of a stream: the union the handler's `Events` carry, and how each is sent. */
 export const eventsEnum = (e: Events) => `
@@ -689,6 +712,8 @@ export const contractModule = (c: {
   computed: string[];
   /** `(operationId, &[tags], deprecated, whether the body is required)` of each operation. */
   operations: string[];
+  /** `(operationId, json)` of the request body of each operation that takes a file or a form. */
+  bodies: string[];
   body: string[];
 }) => `
 pub mod ${c.module} {
@@ -742,7 +767,7 @@ ${c.documented ? `
     /// The OpenAPI document of this contract, as the TypeSpec emitter writes it.
     pub fn document() -> serde_json::Value {
         let mut document = serde_json::to_value(<ApiDoc as utoipa::OpenApi>::openapi()).expect("the document serializes");
-        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}], &[${c.exact.join(", ")}], &[${c.shapes.join(", ")}], &[${c.exactProperties.join(", ")}], &[${c.computed.join(", ")}]);
+        finish(&mut document, &[${c.items.join(", ")}], &[${c.operations.join(", ")}], &[${c.exact.join(", ")}], &[${c.shapes.join(", ")}], &[${c.exactProperties.join(", ")}], &[${c.computed.join(", ")}], &[${c.bodies.join(", ")}]);
         document
     }` : ""}
 }`;

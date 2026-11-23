@@ -87,7 +87,7 @@ publish = false
 [workspace]
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path", "multipart"] }
 form_urlencoded = "1"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }

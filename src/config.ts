@@ -28,6 +28,10 @@ export interface Config {
   maxQueryPairs: number;
   /** How deep the JSON of a request body may nest. */
   maxJsonDepth: number;
+  /** The body limit set on the route of an upload operation, when the contract's author sets one. */
+  maxUploadBytes?: number;
+  maxFormFieldBytes: number;
+  maxFormParts: number;
   /** Whether a response may carry an untyped `serde_json::Value`. */
   allowUntyped: boolean;
   /** `typespec`: schemas written by hand to match `@typespec/openapi3` to the letter; `derived`: whatever utoipa's derive writes; `none`: no document, so no utoipa. */
